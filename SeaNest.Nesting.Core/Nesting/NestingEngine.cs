@@ -26,6 +26,14 @@ namespace SeaNest.Nesting.Core.Nesting
         /// <summary>Report progress (0..1) and status text. May be null.</summary>
         public Action<double, string> ProgressCallback { get; set; }
 
+        /// <summary>
+        /// Verbose engine-internal diagnostic messages (per-orientation timings, cache
+        /// stats, etc). Independent of <see cref="ProgressCallback"/> — diagnostics
+        /// don't carry a meaningful progress fraction and shouldn't perturb the
+        /// progress bar. Typically wired to a logger or RhinoApp.WriteLine. May be null.
+        /// </summary>
+        public Action<string> DiagnosticCallback { get; set; }
+
         public NestResponse Nest(NestRequest request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
@@ -72,7 +80,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             // Step 3: Construct placement engine.
             var engine = new NfpPlacementEngine(request, orientationsByPart, cache);
-            engine.DiagnosticLog = msg => ProgressCallback?.Invoke(0.5, msg);
+            engine.DiagnosticLog = DiagnosticCallback;
 
             // Step 4: Place parts.
             NfpPlacementEngine.NestResult result;

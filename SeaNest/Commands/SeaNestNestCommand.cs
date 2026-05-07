@@ -181,14 +181,10 @@ namespace SeaNest.Commands
                 {
                     ProgressCallback = (frac, msg) =>
                     {
-                        // Diagnostic lines start with two spaces; route those to Rhino's command line.
-                        if (msg != null && msg.StartsWith("  "))
-                        {
-                            RhinoApp.WriteLine(msg);
-                        }
                         dialog.UpdateStatus(msg);
                         Application.Instance.RunIteration();
-                    }
+                    },
+                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg)
                 };
                 response = engine.Nest(request);
             }
