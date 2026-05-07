@@ -8,16 +8,6 @@ namespace SeaNest.Nesting.Core.Nesting
 {
     public static class NoFitPolygon
     {
-        private static string LogPath => System.IO.Path.Combine(
-            System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop),
-            "seanest_nfp.log");
-
-        private static void Log(string message)
-        {
-            try { System.IO.File.AppendAllText(LogPath, message + "\r\n"); }
-            catch { }
-        }
-
         /// <summary>
         /// Tolerance for simplifying NFP output polygons, in model units.
         /// NFP outputs from MinkowskiDiff have dense vertex runs along edges — each
@@ -47,22 +37,11 @@ namespace SeaNest.Nesting.Core.Nesting
 
             var allNfpPaths = new Paths64();
 
-            Log($"=== NFP.Compute entered: a={a.Count}v b={b.Count}v inflatedA.Count={inflatedA.Count} ===");
-
-            var sw = new System.Diagnostics.Stopwatch();
             foreach (var aPiece in inflatedA)
             {
                 Path64 aPath = ClipperConvert.ToPath64(aPiece);
 
-                sw.Restart();
                 Paths64 nfpPiece = Clipper.MinkowskiDiff(bPath, aPath, isClosed: true);
-                sw.Stop();
-
-                int rawVerts = 0;
-                if (nfpPiece != null)
-                    foreach (var p in nfpPiece) rawVerts += p.Count;
-
-                Log($"  MinkowskiDiff: a={aPath.Count}v b={bPath.Count}v -> {(nfpPiece?.Count ?? 0)} paths, {rawVerts} verts in {sw.ElapsedMilliseconds}ms");
 
                 if (nfpPiece == null || nfpPiece.Count == 0) continue;
 
@@ -73,15 +52,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 return Array.Empty<Polygon>();
 
             // Union all NFPs from each A piece.
-            sw.Restart();
             Paths64 unioned = Clipper.Union(allNfpPaths, FillRule.Positive);
-            sw.Stop();
-
-            int unionVerts = 0;
-            if (unioned != null)
-                foreach (var p in unioned) unionVerts += p.Count;
-
-            Log($"  Union: {unionVerts} verts in {sw.ElapsedMilliseconds}ms");
 
             if (unioned == null || unioned.Count == 0)
                 return Array.Empty<Polygon>();
@@ -91,19 +62,9 @@ namespace SeaNest.Nesting.Core.Nesting
             // simplification — preserves placement geometry within CAM precision.
             var polygons = ClipperConvert.FromPaths64(unioned);
 
-            sw.Restart();
             var simplified = new List<Polygon>(polygons.Count);
-            int beforeVerts = 0, afterVerts = 0;
             foreach (var poly in polygons)
-            {
-                beforeVerts += poly.Count;
-                var s = poly.Simplify(NfpSimplifyTolerance);
-                afterVerts += s.Count;
-                simplified.Add(s);
-            }
-            sw.Stop();
-
-            Log($"  Simplify: {beforeVerts} -> {afterVerts} verts in {sw.ElapsedMilliseconds}ms");
+                simplified.Add(poly.Simplify(NfpSimplifyTolerance));
 
             return simplified;
         }
