@@ -256,9 +256,6 @@ namespace SeaNest.Nesting.Core.Geometry
         {
             if (tolerance <= 0 || _points.Length <= 3)
                 return this;
-            System.IO.File.AppendAllText(
-    System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop), "seanest_dp.log"),
-    $"DP entered: count={_points.Length} tol={tolerance}\r\n");
             var pts = new List<Point2D>(_points);
             double tolSq = tolerance * tolerance;
 
@@ -357,10 +354,6 @@ namespace SeaNest.Nesting.Core.Geometry
             var kept = new List<Point2D>(n);
             for (int i = 0; i < n; i++)
                 if (keep[i]) kept.Add(opened[i]);
-
-            System.IO.File.AppendAllText(
-    System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop), "seanest_dp.log"),
-    $"DP exiting: kept={kept.Count}\r\n");
 
             if (kept.Count < 3) return this; // safety: never reduce below triangle
             return new Polygon(kept);
