@@ -130,6 +130,20 @@ namespace SeaNest.Nesting.Core.Nesting
             ProgressCallback?.Invoke(1.0,
                 $"Nest complete: {result.SheetCount} sheets, {result.Unplaced.Count} unplaced");
 
+            // Confidence summary: surface only when MinkowskiDiff produced CW
+            // sub-loops that NoFitPolygon.Compute had to reverse. On clean
+            // convex inputs this is zero. Non-zero values are the trigger to
+            // think hard about the convex-only safety limitation documented in
+            // NoFitPolygon — for genuinely concave parts, blanket CW reversal
+            // can erase legitimate hole encodings. Denominator (cache.Count) is
+            // the total number of unique NFPs computed during this run.
+            int corrections = NoFitPolygon.CwCorrectionsTotal;
+            if (corrections > 0)
+            {
+                DiagnosticCallback?.Invoke(
+                    $"NFP: corrected {corrections} CW paths to CCW (out of {cache.Count} NFPs computed)");
+            }
+
             return new NestResponse(
                 placementsSorted,
                 new List<int>(result.Unplaced),

@@ -226,7 +226,14 @@ namespace SeaNest.Nesting.Core.Nesting
 
             var newPlaced = new PlacedItem(best.Orientation, best.X, best.Y);
             sheet.Placed.Add(newPlaced);
-            UpdateForbiddenAfterPlacement(newPlaced, sheet);
+
+            // Invalidate the per-attempt forbidden-region cache. The next
+            // TryPlaceOnSheet call rebuilds entries lazily as it queries each
+            // candidate orientation; orientations that the engine never queries
+            // never get computed. See GetOrBuildForbiddenRegion for the cache-
+            // miss build path.
+            sheet.ForbiddenByOrientation.Clear();
+
             return true;
         }
 
@@ -235,36 +242,35 @@ namespace SeaNest.Nesting.Core.Nesting
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// Get the cumulative forbidden region for this candidate orientation on this sheet.
-        /// Returns the cached union if available, otherwise builds it from scratch from
-        /// every already-placed part's NFP against this candidate orientation.
+        /// Get the forbidden region for this candidate orientation on this sheet,
+        /// building it on demand from the currently-placed parts and the NFP cache.
         ///
-        /// Each cached NFP is in translation space relative to the placed part's reference
-        /// point; to express it in the candidate orientation's translation space, we
-        /// translate by the placed part's placement (X, Y) before unioning.
+        /// Sheet-level cache (<see cref="SheetState.ForbiddenByOrientation"/>) holds
+        /// results for the duration of a single placement attempt batch — repeated
+        /// queries for the same candidate orientation within one TryPlaceOnSheet call
+        /// hit the cache. After every placement, <see cref="TryPlaceOnSheet"/> clears
+        /// the sheet cache so the next attempt rebuilds against the new placed-parts
+        /// set. Orientations the engine never queries are never computed; only the
+        /// orientations of the currently-placing candidate ever produce work.
         ///
-        /// O(1) work per call after the orientation is first seen — see <see cref="UpdateForbiddenAfterPlacement"/>
-        /// for how the cache is incrementally maintained.
+        /// Each cached NFP from <see cref="_nfpCache"/> is in translation space relative
+        /// to the placed part's reference point (its bbox-min); to express it in the
+        /// candidate orientation's translation space, we translate by the placed part's
+        /// placement (X, Y) before unioning.
         /// </summary>
         private Paths64 GetOrBuildForbiddenRegion(
     OrientedPart candidate,
     SheetState sheet)
         {
-            // After UpdateForbiddenAfterPlacement runs on every placement, every
-            // orientation has a cache entry. Empty sheet (no placements yet) means
-            // no forbidden region — return empty.
             if (sheet.Placed.Count == 0)
                 return new Paths64();
 
             if (sheet.ForbiddenByOrientation.TryGetValue(candidate.OrientationIndex, out var cached))
                 return cached;
 
-            // Should not happen if UpdateForbiddenAfterPlacement is called on every
-            // placement — but stay safe and build from scratch just in case.
-
-            // First time this orientation is queried for this sheet — build from scratch
-            // against currently placed parts. After this, the cache is maintained
-            // incrementally in UpdateForbiddenAfterPlacement.
+            // Cache miss — build the cumulative forbidden region from sheet.Placed
+            // by fetching each (placed orientation, candidate) NFP from _nfpCache,
+            // translating by the placed part's placement, and unioning.
             var allNfps = new Paths64();
             foreach (var placed in sheet.Placed)
             {
@@ -282,77 +288,6 @@ namespace SeaNest.Nesting.Core.Nesting
 
             sheet.ForbiddenByOrientation[candidate.OrientationIndex] = union;
             return union;
-        }
-
-        /// <summary>
-        /// After a part is placed, update the cumulative forbidden region for EVERY
-        /// candidate orientation that could possibly be queried later — including ones
-        /// that haven't been queried yet on this sheet. This pays the work up front so
-        /// every <see cref="GetOrBuildForbiddenRegion"/> call after this is a cache hit.
-        ///
-        /// Cost per placement: O(orientations × NFPs-per-pair). Constant w.r.t. placed
-        /// part count — that's the win over the previous from-scratch rebuild.
-        /// </summary>
-        private void UpdateForbiddenAfterPlacement(
-    PlacedItem newlyPlaced,
-    SheetState sheet)
-        {
-            int correctionsBefore = NoFitPolygon.CwCorrectionsTotal;
-
-            foreach (var perPart in _orientationsByPart)
-            {
-                foreach (var candidate in perPart)
-                {
-                    var nfp = _nfpCache.Get(newlyPlaced.Orientation, candidate);
-                    if (nfp.Count == 0) continue;
-
-                    var newPaths = new Paths64();
-                    foreach (var nfpPoly in nfp)
-                    {
-                        var translated = nfpPoly.Translate(newlyPlaced.X, newlyPlaced.Y);
-                        newPaths.Add(ClipperConvert.ToPath64(translated));
-                    }
-                    if (newPaths.Count == 0) continue;
-
-                    if (!sheet.ForbiddenByOrientation.TryGetValue(candidate.OrientationIndex, out var existing))
-                    {
-                        existing = new Paths64();
-                    }
-
-                    var merged = new Paths64(existing);
-                    merged.AddRange(newPaths);
-
-                    sheet.ForbiddenByOrientation[candidate.OrientationIndex]
-                        = Clipper.Union(merged, FillRule.Positive);
-                }
-            }
-
-            // Confidence summary: surface only when fresh NFP computations during
-            // this Update reversed CW paths to CCW. On clean convex inputs this
-            // count is zero after the cache warms up; non-zero values are
-            // expected on real concave boat-part inputs (Clipper2 MinkowskiDiff
-            // emits CW sub-loops for some shape pairs — see NoFitPolygon for
-            // the fix and the convex-only safety limitation).
-            int delta = NoFitPolygon.CwCorrectionsTotal - correctionsBefore;
-            if (delta > 0)
-                DiagnosticLog?.Invoke($"  UpdateForbidden corrected {delta} CW paths to CCW");
-        }
-
-        /// <summary>
-        /// Linear lookup for an orientation by its index. Called rarely (only once per
-        /// cache-key per placement), so a flat scan is fine.
-        /// </summary>
-        private OrientedPart FindOrientationByIndex(int orientationIndex)
-        {
-            foreach (var perPart in _orientationsByPart)
-            {
-                foreach (var orientation in perPart)
-                {
-                    if (orientation.OrientationIndex == orientationIndex)
-                        return orientation;
-                }
-            }
-            return null;
         }
 
         /// <summary>
@@ -425,10 +360,13 @@ namespace SeaNest.Nesting.Core.Nesting
             public List<PlacedItem> Placed { get; } = new List<PlacedItem>();
 
             /// <summary>
-            /// Cumulative forbidden region for this sheet, keyed by candidate orientation index.
-            /// As parts are placed, each candidate orientation's forbidden region is updated by
-            /// unioning ONE new NFP into the running total — never recomputed from scratch.
-            /// Replaces the O(N) re-union per placement attempt with O(1) work.
+            /// Per-attempt cache of forbidden regions keyed by candidate orientation index.
+            /// Populated lazily by <see cref="GetOrBuildForbiddenRegion"/> on first query
+            /// for an orientation; cleared by <see cref="TryPlaceOnSheet"/> immediately
+            /// after every successful placement so the next attempt rebuilds against the
+            /// new placed-parts set. Orientations the engine never queries during an
+            /// attempt are never computed — that's the win over the previous eager-on-
+            /// every-orientation pre-population.
             /// </summary>
             public Dictionary<int, Paths64> ForbiddenByOrientation { get; }
                 = new Dictionary<int, Paths64>();
