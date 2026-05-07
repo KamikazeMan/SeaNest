@@ -162,6 +162,26 @@ namespace SeaNest.Nesting.Core.Nesting
                 sw.Stop();
                 tFeasible += sw.ElapsedMilliseconds;
 
+                // Per-attempt diagnostic — drives the engine-vs-verifier overlap
+                // diagnosis. Emits exactly when DiagnosticLog is wired AND there is
+                // at least one part already placed on this sheet (the case we're
+                // hunting). For the first part on a sheet, forbidden is trivially
+                // empty by design and the diagnostic noise isn't useful.
+                if (DiagnosticLog != null && sheet.Placed.Count > 0)
+                {
+                    DescribePaths64(forbidden, out int forbPaths, out int forbVerts,
+                        out double forbAreaCcw, out double forbAreaCw);
+                    DescribePaths64(feasible, out int feasPaths, out int feasVerts,
+                        out double feasAreaCcw, out double feasAreaCw);
+
+                    DiagnosticLog.Invoke(
+                        $"  Attempt p{partIndex}/o{orientation.OrientationIndex} sheet{sheetIdx} " +
+                        $"rot{orientation.RotationDeg:F0}{(orientation.IsMirrored ? "m" : "")} " +
+                        $"IFP=[{ifpBox.MinX:F3},{ifpBox.MinY:F3}]-[{ifpBox.MaxX:F3},{ifpBox.MaxY:F3}] " +
+                        $"forb={{paths={forbPaths}, verts={forbVerts}, areaCCW={forbAreaCcw:G6}, areaCW={forbAreaCw:G6}}} " +
+                        $"feas={{paths={feasPaths}, verts={feasVerts}, areaCCW={feasAreaCcw:G6}, areaCW={feasAreaCw:G6}}}");
+                }
+
                 if (feasible.Count == 0) continue;
 
                 sw.Restart();
@@ -195,7 +215,7 @@ namespace SeaNest.Nesting.Core.Nesting
     $"forbidden {tForbidden}ms, " +
     $"feasible {tFeasible}ms, " +
     $"BL {tBlSweep}ms, " +
-    $"best={(best != null ? "yes" : "no")}");
+    $"best={(best != null ? $"yes orient={best.Orientation.OrientationIndex} BL=({best.X:F3},{best.Y:F3})" : "no")}");
 
 
 
@@ -424,6 +444,35 @@ namespace SeaNest.Nesting.Core.Nesting
             }
 
             return found ? ((double, double)?)(bestX, bestY) : null;
+        }
+
+        /// <summary>
+        /// Diagnostic helper: summarize a Paths64 region. Reports separate CCW and CW
+        /// area totals so the caller can immediately see if a region is "filled" only
+        /// by CW paths (which FillRule.Positive would treat as empty) or by CCW paths
+        /// (which FillRule.Positive would treat as filled). Areas in model units.
+        /// </summary>
+        private static void DescribePaths64(
+            Paths64 paths,
+            out int pathCount,
+            out int vertexCount,
+            out double areaCcw,
+            out double areaCw)
+        {
+            pathCount = paths == null ? 0 : paths.Count;
+            vertexCount = 0;
+            areaCcw = 0.0;
+            areaCw = 0.0;
+            if (paths == null) return;
+            double scaleSq = ClipperConvert.Scale * ClipperConvert.Scale;
+            for (int i = 0; i < paths.Count; i++)
+            {
+                var p = paths[i];
+                vertexCount += p.Count;
+                double signedArea = Clipper.Area(p) / scaleSq; // signed; CCW = positive
+                if (signedArea >= 0) areaCcw += signedArea;
+                else areaCw += -signedArea;
+            }
         }
 
         // ------------------------------------------------------------------
