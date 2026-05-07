@@ -1,0 +1,92 @@
+using System.Collections.Generic;
+using Clipper2Lib;
+using SeaNest.Nesting.Core.Geometry;
+
+namespace SeaNest.Nesting.Core.Overlap
+{
+    /// <summary>
+    /// Polygon-vs-polygon overlap detection using Clipper2 intersection.
+    ///
+    /// Single source of truth for "do these two polygons overlap?" — called by both the
+    /// nesting engine (during candidate placement) and the final verifier (before writing
+    /// to the Rhino document). Both callers share the same answer, so the engine cannot
+    /// place parts that the verifier will then reject.
+    ///
+    /// Internally scales doubles into Clipper's long coordinate space at <see cref="ClipperScale"/>
+    /// precision (0.0001 units), which is far finer than any real sheet-metal tolerance.
+    /// </summary>
+    public static class OverlapChecker
+    {
+        /// <summary>
+        /// Scale factor used when converting doubles to Clipper's int64 coordinate space.
+        /// 10,000 gives 0.0001-unit resolution with ~922 trillion units of working headroom.
+        /// </summary>
+        public const double ClipperScale = 10000.0;
+
+        /// <summary>
+        /// Default linear tolerance for overlap detection, in model units.
+        /// Intersections smaller than <c>tolerance * tolerance</c> (by area) are treated as non-overlapping.
+        /// 0.01 is generous enough to absorb Clipper's integer-space edge-touch noise while
+        /// still being far tighter than any real sheet-metal tolerance.
+        /// </summary>
+        public const double DefaultTolerance = 0.01;
+
+        /// <summary>
+        /// Return true if polygons <paramref name="a"/> and <paramref name="b"/> overlap by more than
+        /// a <paramref name="tolerance"/>-sized sliver.
+        /// </summary>
+        public static bool Overlaps(Polygon a, Polygon b, double tolerance = DefaultTolerance)
+        {
+            if (!a.BoundingBox.Intersects(b.BoundingBox))
+                return false;
+
+            var subject = new Paths64 { ToPath64(a) };
+            var clip = new Paths64 { ToPath64(b) };
+
+            var solution = Clipper.Intersect(subject, clip, FillRule.NonZero);
+
+            if (solution == null || solution.Count == 0)
+                return false;
+
+            double scaledArea = 0.0;
+            for (int i = 0; i < solution.Count; i++)
+            {
+                double a2 = Clipper.Area(solution[i]);
+                if (a2 < 0) a2 = -a2;
+                scaledArea += a2;
+            }
+
+            double modelArea = scaledArea / (ClipperScale * ClipperScale);
+            double areaThreshold = tolerance * tolerance;
+
+            return modelArea > areaThreshold;
+        }
+
+        /// <summary>
+        /// Return true if <paramref name="candidate"/> overlaps any polygon in <paramref name="others"/>.
+        /// Short-circuits on the first overlap found.
+        /// </summary>
+        public static bool OverlapsAny(Polygon candidate, IEnumerable<Polygon> others, double tolerance = DefaultTolerance)
+        {
+            foreach (var other in others)
+            {
+                if (Overlaps(candidate, other, tolerance))
+                    return true;
+            }
+            return false;
+        }
+
+        private static Path64 ToPath64(Polygon poly)
+        {
+            var path = new Path64(poly.Count);
+            var pts = poly.Points;
+            for (int i = 0; i < pts.Count; i++)
+            {
+                long x = (long)(pts[i].X * ClipperScale);
+                long y = (long)(pts[i].Y * ClipperScale);
+                path.Add(new Point64(x, y));
+            }
+            return path;
+        }
+    }
+}

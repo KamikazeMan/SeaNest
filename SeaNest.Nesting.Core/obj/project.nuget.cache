@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "dgSpecHash": "0maIoKOwM3s=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\David LaChute\\.nuget\\packages\\clipper2\\2.0.0\\clipper2.2.0.0.nupkg.sha512",
+    "C:\\Users\\David LaChute\\.nuget\\packages\\microsoft.netcore.platforms\\1.1.0\\microsoft.netcore.platforms.1.1.0.nupkg.sha512",
+    "C:\\Users\\David LaChute\\.nuget\\packages\\netstandard.library\\2.0.3\\netstandard.library.2.0.3.nupkg.sha512"
+  ],
+  "logs": []
+}

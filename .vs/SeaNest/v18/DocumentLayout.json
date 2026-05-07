@@ -1,0 +1,224 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{ED7FE186-7B29-4545-9949-89C9E7074A32}|SeaNest\\SeaNest.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest\\rhinoadapters\\brepflattener.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{ED7FE186-7B29-4545-9949-89C9E7074A32}|SeaNest\\SeaNest.csproj|solutionrelative:seanest\\rhinoadapters\\brepflattener.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest.nesting.core\\geometry\\polygon.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|solutionrelative:seanest.nesting.core\\geometry\\polygon.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{ED7FE186-7B29-4545-9949-89C9E7074A32}|SeaNest\\SeaNest.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest\\commands\\seanestshowpolygons.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{ED7FE186-7B29-4545-9949-89C9E7074A32}|SeaNest\\SeaNest.csproj|solutionrelative:seanest\\commands\\seanestshowpolygons.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest.nesting.core\\nesting\\nofitpolygon.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|solutionrelative:seanest.nesting.core\\nesting\\nofitpolygon.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest.nesting.core\\nesting\\innerfitpolygon.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|solutionrelative:seanest.nesting.core\\nesting\\innerfitpolygon.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest.nesting.core\\nesting\\orientedpart.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|solutionrelative:seanest.nesting.core\\nesting\\orientedpart.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest.nesting.core\\nesting\\nfpcache.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|solutionrelative:seanest.nesting.core\\nesting\\nfpcache.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest.nesting.core\\nesting\\nfpplacementengine.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|solutionrelative:seanest.nesting.core\\nesting\\nfpplacementengine.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{ED7FE186-7B29-4545-9949-89C9E7074A32}|SeaNest\\SeaNest.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest\\core\\seanestsettings.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{ED7FE186-7B29-4545-9949-89C9E7074A32}|SeaNest\\SeaNest.csproj|solutionrelative:seanest\\core\\seanestsettings.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest.nesting.core\\nesting\\nestingengine.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|solutionrelative:seanest.nesting.core\\nesting\\nestingengine.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{ED7FE186-7B29-4545-9949-89C9E7074A32}|SeaNest\\SeaNest.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest\\commands\\seanestnestcommand.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{ED7FE186-7B29-4545-9949-89C9E7074A32}|SeaNest\\SeaNest.csproj|solutionrelative:seanest\\commands\\seanestnestcommand.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|c:\\users\\david lachute\\source\\repos\\seanest\\seanest.nesting.core\\overlap\\overlapchecker.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{803D039D-E6C3-488C-A9B1-BAB2AE223BA0}|SeaNest.Nesting.Core\\SeaNest.Nesting.Core.csproj|solutionrelative:seanest.nesting.core\\overlap\\overlapchecker.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 4,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 5,
+              "Title": "OrientedPart.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\OrientedPart.cs",
+              "RelativeDocumentMoniker": "SeaNest.Nesting.Core\\Nesting\\OrientedPart.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\OrientedPart.cs",
+              "RelativeToolTip": "SeaNest.Nesting.Core\\Nesting\\OrientedPart.cs",
+              "ViewState": "AgIAAIMAAAAAAAAAAAA6wLYAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T19:30:22.551Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 6,
+              "Title": "NfpCache.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\NfpCache.cs",
+              "RelativeDocumentMoniker": "SeaNest.Nesting.Core\\Nesting\\NfpCache.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\NfpCache.cs",
+              "RelativeToolTip": "SeaNest.Nesting.Core\\Nesting\\NfpCache.cs",
+              "ViewState": "AgIAACsAAAAAAAAAAADwv1sAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T19:29:57.372Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "NoFitPolygon.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\NoFitPolygon.cs",
+              "RelativeDocumentMoniker": "SeaNest.Nesting.Core\\Nesting\\NoFitPolygon.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\NoFitPolygon.cs",
+              "RelativeToolTip": "SeaNest.Nesting.Core\\Nesting\\NoFitPolygon.cs",
+              "ViewState": "AgIAADsAAAAAAAAAAAAAAG4AAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T19:29:20.773Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 9,
+              "Title": "NestingEngine.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\NestingEngine.cs",
+              "RelativeDocumentMoniker": "SeaNest.Nesting.Core\\Nesting\\NestingEngine.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\NestingEngine.cs",
+              "RelativeToolTip": "SeaNest.Nesting.Core\\Nesting\\NestingEngine.cs",
+              "ViewState": "AgIAADsAAAAAAAAAAAAhwEoAAABNAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T18:14:10.634Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "BrepFlattener.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest\\RhinoAdapters\\BrepFlattener.cs",
+              "RelativeDocumentMoniker": "SeaNest\\RhinoAdapters\\BrepFlattener.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest\\RhinoAdapters\\BrepFlattener.cs",
+              "RelativeToolTip": "SeaNest\\RhinoAdapters\\BrepFlattener.cs",
+              "ViewState": "AgIAAB8AAAAAAAAAAAAgwCMAAAAJAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T17:46:38.884Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "Polygon.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Geometry\\Polygon.cs",
+              "RelativeDocumentMoniker": "SeaNest.Nesting.Core\\Geometry\\Polygon.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Geometry\\Polygon.cs",
+              "RelativeToolTip": "SeaNest.Nesting.Core\\Geometry\\Polygon.cs",
+              "ViewState": "AgIAAE4BAAAAAAAAAAAhwGoBAAAqAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T17:45:57.843Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "SeaNestShowPolygons.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest\\Commands\\SeaNestShowPolygons.cs",
+              "RelativeDocumentMoniker": "SeaNest\\Commands\\SeaNestShowPolygons.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest\\Commands\\SeaNestShowPolygons.cs",
+              "RelativeToolTip": "SeaNest\\Commands\\SeaNestShowPolygons.cs",
+              "ViewState": "AgIAAAIAAAAAAAAAAAAAADUAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T20:22:49.384Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 7,
+              "Title": "NfpPlacementEngine.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\NfpPlacementEngine.cs",
+              "RelativeDocumentMoniker": "SeaNest.Nesting.Core\\Nesting\\NfpPlacementEngine.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\NfpPlacementEngine.cs",
+              "RelativeToolTip": "SeaNest.Nesting.Core\\Nesting\\NfpPlacementEngine.cs",
+              "ViewState": "AgIAAKQBAAAAAAAAAAAuwNEBAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T17:56:34.789Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "InnerFitPolygon.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\InnerFitPolygon.cs",
+              "RelativeDocumentMoniker": "SeaNest.Nesting.Core\\Nesting\\InnerFitPolygon.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Nesting\\InnerFitPolygon.cs",
+              "RelativeToolTip": "SeaNest.Nesting.Core\\Nesting\\InnerFitPolygon.cs",
+              "ViewState": "AgIAADEAAAAAAAAAAAAqwGQAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T19:30:52.452Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 11,
+              "Title": "OverlapChecker.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Overlap\\OverlapChecker.cs",
+              "RelativeDocumentMoniker": "SeaNest.Nesting.Core\\Overlap\\OverlapChecker.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest.Nesting.Core\\Overlap\\OverlapChecker.cs",
+              "RelativeToolTip": "SeaNest.Nesting.Core\\Overlap\\OverlapChecker.cs",
+              "ViewState": "AgIAAB4AAAAAAAAAAAAUwDcAAAAhAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T16:02:10.259Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 8,
+              "Title": "SeaNestSettings.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest\\Core\\SeaNestSettings.cs",
+              "RelativeDocumentMoniker": "SeaNest\\Core\\SeaNestSettings.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest\\Core\\SeaNestSettings.cs",
+              "RelativeToolTip": "SeaNest\\Core\\SeaNestSettings.cs",
+              "ViewState": "AgIAAAYAAAAAAAAAAAAAABMAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T15:24:15.237Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 10,
+              "Title": "SeaNestNestCommand.cs",
+              "DocumentMoniker": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest\\Commands\\SeaNestNestCommand.cs",
+              "RelativeDocumentMoniker": "SeaNest\\Commands\\SeaNestNestCommand.cs",
+              "ToolTip": "C:\\Users\\David LaChute\\source\\repos\\SeaNest\\SeaNest\\Commands\\SeaNestNestCommand.cs",
+              "RelativeToolTip": "SeaNest\\Commands\\SeaNestNestCommand.cs",
+              "ViewState": "AgIAAKsAAAAAAAAAAAAhwL8AAAASAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-04-27T15:23:44.324Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net7.0;net48</TargetFrameworks>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <TargetExt>.rhp</TargetExt>
+    <NoWarn>NU1701</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Plugin identity. These become assembly attributes via SDK auto-generation.
+         Plugin Guid and PlugInDescription attributes live in Properties\AssemblyInfo.cs. -->
+    <Version>1.0</Version>
+    <Title>SeaNest</Title>
+    <Company>SeaNest Authors</Company>
+    <Description>Precision Automation for Marine Builders</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Clipper2" Version="2.0.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="RhinoCommon" Version="8.0.23304.9001" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SeaNest.Nesting.Core\SeaNest.Nesting.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="RhinoAdapters\" />
+  </ItemGroup>
+
+</Project>
