@@ -1,4 +1,6 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Text;
 using Clipper2Lib;
 using SeaNest.Nesting.Core.Geometry;
 
@@ -26,6 +28,15 @@ namespace SeaNest.Nesting.Core.Overlap
         private const double MiterLimit = 2.0;
 
         /// <summary>
+        /// Optional diagnostic sink. When wired, every Inflate call where the
+        /// output contains a CW path (unexpected) emits a one-line summary of
+        /// the input polygon's signed area + winding and each output polygon's
+        /// signed area + winding. Used to attribute spurious CW sub-loops in
+        /// the forbidden region to ClipperOffset vs Minkowski/Union.
+        /// </summary>
+        public static Action<string> DiagnosticLog { get; set; }
+
+        /// <summary>
         /// Inflate (offset) a polygon by the given delta, in model units.
         ///
         /// Positive delta grows the polygon outward (e.g. for spacing buffers around placed parts).
@@ -49,7 +60,30 @@ namespace SeaNest.Nesting.Core.Overlap
             var solution = new Paths64();
             offsetter.Execute(scaledDelta, solution);
 
-            return ClipperConvert.FromPaths64(solution);
+            var result = ClipperConvert.FromPaths64(solution);
+
+            // Diagnostic: report when output contains a CW path. CCW input + CCW
+            // output is the expected fast path and is silenced.
+            if (DiagnosticLog != null)
+            {
+                int cwCount = 0;
+                for (int i = 0; i < result.Count; i++)
+                    if (!result[i].IsCounterClockwise) cwCount++;
+                if (cwCount > 0)
+                {
+                    var sb = new StringBuilder();
+                    sb.Append($"  Inflate delta={delta:G6} input(verts={polygon.Count}, area={polygon.Area:G6}, CCW={polygon.IsCounterClockwise}) -> {result.Count}p");
+                    for (int i = 0; i < result.Count; i++)
+                    {
+                        sb.Append(i == 0 ? " [" : "; ");
+                        sb.Append($"verts={result[i].Count}, area={result[i].Area:G6}, CCW={result[i].IsCounterClockwise}");
+                    }
+                    if (result.Count > 0) sb.Append("]");
+                    DiagnosticLog.Invoke(sb.ToString());
+                }
+            }
+
+            return result;
         }
     }
 }
