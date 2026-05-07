@@ -225,15 +225,13 @@ namespace SeaNest.Nesting.Core.Nesting
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// Union of NFPs against every already-placed part on this sheet. Each cached
-        /// NFP is in translation space relative to the placed part's origin (its own
-        /// reference point); to express it in the candidate orientation's translation
-        /// space, we translate by the placed part's placement (X, Y).
-        /// </summary>
-        /// <summary>
         /// Get the cumulative forbidden region for this candidate orientation on this sheet.
-        /// Returns the cached union if available, otherwise builds it from scratch (only on
-        /// the first time this orientation is queried for this sheet).
+        /// Returns the cached union if available, otherwise builds it from scratch from
+        /// every already-placed part's NFP against this candidate orientation.
+        ///
+        /// Each cached NFP is in translation space relative to the placed part's reference
+        /// point; to express it in the candidate orientation's translation space, we
+        /// translate by the placed part's placement (X, Y) before unioning.
         ///
         /// O(1) work per call after the orientation is first seen — see <see cref="UpdateForbiddenAfterPlacement"/>
         /// for how the cache is incrementally maintained.
@@ -276,12 +274,6 @@ namespace SeaNest.Nesting.Core.Nesting
             return union;
         }
 
-        /// <summary>
-        /// After a part is placed, update the cumulative forbidden region for every
-        /// orientation cache entry: union in the newly-placed part's NFP against each
-        /// cached orientation. This is the O(1) incremental update that replaces the
-        /// O(N) full re-union of the previous implementation.
-        /// </summary>
         /// <summary>
         /// After a part is placed, update the cumulative forbidden region for EVERY
         /// candidate orientation that could possibly be queried later — including ones
