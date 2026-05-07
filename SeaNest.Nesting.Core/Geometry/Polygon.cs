@@ -20,6 +20,7 @@ namespace SeaNest.Nesting.Core.Geometry
         private BoundingBox2D? _bbox;
         private double? _area;
         private Point2D? _centroid;
+        private bool? _isConvex;
 
         /// <summary>
         /// Create a polygon from a sequence of points.
@@ -115,6 +116,32 @@ namespace SeaNest.Nesting.Core.Geometry
                 if (!_centroid.HasValue)
                     _centroid = ComputeCentroid();
                 return _centroid.Value;
+            }
+        }
+
+        /// <summary>
+        /// True if the polygon is convex — every interior angle ≤ 180° (winding-
+        /// agnostic: works for both CCW and CW polygons). Computed lazily and
+        /// cached.
+        ///
+        /// Used by the NFP pipeline to short-circuit the concave-aware CW filter
+        /// when both inputs are convex: the Minkowski difference of two convex
+        /// polygons is mathematically convex (single CCW outer boundary, no
+        /// holes), so any CW sub-loop in the Union output is necessarily a
+        /// numerical artifact and gets blanket-reversed without invoking the
+        /// area+PIP classifier (which can't distinguish convex-input artifacts
+        /// from real concave-input holes by spatial criteria alone).
+        ///
+        /// Self-intersecting polygons (figure-8) can pass this test but aren't
+        /// produced by any caller — Polygon doesn't validate simplicity.
+        /// </summary>
+        public bool IsConvex
+        {
+            get
+            {
+                if (!_isConvex.HasValue)
+                    _isConvex = ComputeIsConvex();
+                return _isConvex.Value;
             }
         }
 
@@ -469,6 +496,51 @@ namespace SeaNest.Nesting.Core.Geometry
 
             double factor = 1.0 / (6.0 * signedArea);
             return new Point2D(cx * factor, cy * factor);
+        }
+
+        private bool ComputeIsConvex()
+        {
+            // For each vertex, cross-product of the incoming edge with the
+            // outgoing edge. Convex iff all non-zero crosses share a sign
+            // (all positive for CCW, all negative for CW). Mixed signs ⇒
+            // at least one reflex vertex ⇒ concave.
+            //
+            // Collinear vertices produce cross == 0; they don't pin a sign
+            // and don't disqualify convexity. An all-collinear polygon
+            // (Area == 0) returns true vacuously, but OrientedPart.Build
+            // asserts CCW (Area > 0) upstream so this path doesn't fire on
+            // engine inputs.
+            //
+            // Tolerance 1e-12 is well below any meaningful geometry on
+            // model-unit polygons (typically inches) and well above
+            // floating-point noise on translate/rotate of typical sizes.
+            int n = _points.Length;
+            if (n < 3) return false;
+            if (n == 3) return true;
+
+            const double eps = 1e-12;
+            int sign = 0;
+
+            for (int i = 0; i < n; i++)
+            {
+                var prev = _points[(i - 1 + n) % n];
+                var curr = _points[i];
+                var next = _points[(i + 1) % n];
+
+                double e1x = curr.X - prev.X;
+                double e1y = curr.Y - prev.Y;
+                double e2x = next.X - curr.X;
+                double e2y = next.Y - curr.Y;
+                double cross = e1x * e2y - e1y * e2x;
+
+                if (Math.Abs(cross) < eps) continue; // collinear vertex; sign-neutral
+
+                int thisSign = cross > 0 ? 1 : -1;
+                if (sign == 0) sign = thisSign;
+                else if (sign != thisSign) return false;
+            }
+
+            return true;
         }
 
         public override string ToString()

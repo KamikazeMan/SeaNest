@@ -84,14 +84,10 @@ namespace SeaNest.Nesting.Core.Nesting
 
             // Reset the concave-aware CW filter counters so the end-of-nest
             // summary reports only this run's classifications. Wire the per-
-            // anomaly and per-CW-classification diagnostic sinks so the
-            // (src-orient, cand-orient) pair of each event surfaces during
-            // the run, not just in counts. ClassificationLog is verbose
-            // (one line per CW path classified) — used for debugging
-            // classifier behavior on real inputs; harmless when wired.
+            // anomaly diagnostic sink so the (src-orient, cand-orient) pair
+            // of each anomaly surfaces during the run.
             NoFitPolygon.ResetCounters();
             NoFitPolygon.AnomalyLog = DiagnosticCallback;
-            NoFitPolygon.ClassificationLog = DiagnosticCallback;
 
             try
             {
@@ -100,7 +96,6 @@ namespace SeaNest.Nesting.Core.Nesting
             finally
             {
                 NoFitPolygon.AnomalyLog = null;
-                NoFitPolygon.ClassificationLog = null;
             }
         }
 

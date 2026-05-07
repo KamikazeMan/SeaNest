@@ -59,10 +59,16 @@ namespace SeaNest.Nesting.Core.Nesting
         private const double SliverAbsoluteFloor = 0.01;
 
         /// <summary>
-        /// Counters for the concave-aware CW filter, reset per nest run via
-        /// <see cref="ResetCounters"/>. End-of-nest summary in NestingEngine
-        /// surfaces these so a real boat-parts run shows a one-line attribution
-        /// of how the filter classified each CW path it saw.
+        /// Number of CW paths reversed to CCW across all <see cref="Compute"/>
+        /// calls in the current nest run. Reset per run via <see cref="ResetCounters"/>.
+        /// Includes both:
+        ///   - Convex-input blanket reversals (every CW from a convex × convex
+        ///     pair is necessarily a numerical artifact; whole-output blanket
+        ///     reverse without per-path classification).
+        ///   - Concave-input by-area sliver reversals (CW paths whose |area|
+        ///     falls below the noise threshold of the area+PIP classifier).
+        /// Both buckets count toward the same total because they share the
+        /// "reverse a CW that isn't a real hole" semantics.
         /// </summary>
         public static int SliverReversalsTotal { get; private set; }
 
@@ -83,15 +89,6 @@ namespace SeaNest.Nesting.Core.Nesting
         /// many, we have the (src-orient, cand-orient) pairs to investigate.
         /// </summary>
         public static Action<string> AnomalyLog { get; set; }
-
-        /// <summary>
-        /// Optional per-CW classification diagnostic sink. When wired, every
-        /// CW path encountered emits one line with the area numbers, the
-        /// threshold computation, the PIP vote breakdown, and the final
-        /// SLIVER / HOLE / ANOMALY verdict. Used to diagnose classifier
-        /// behavior on real inputs; verbose, intended for diagnostic runs.
-        /// </summary>
-        public static Action<string> ClassificationLog { get; set; }
 
         /// <summary>Reset all counters. Call once at the start of a nest run.</summary>
         public static void ResetCounters()
@@ -181,9 +178,34 @@ namespace SeaNest.Nesting.Core.Nesting
             // enters; not produced by typical Minkowski outputs. Upgrade to
             // Clipper.Intersect-based containment if observed.
             // ------------------------------------------------------------------
+            // Convexity gate: NFP of two convex polygons is mathematically
+            // convex (single CCW outer boundary, no holes). Any CW sub-loop in
+            // the Union output is therefore necessarily a numerical artifact
+            // — blanket reverse is correct AND avoids the misclassification
+            // trap where the area+PIP filter would treat a substantial CW
+            // artifact (e.g. ~3% of outer area) as a "real hole" because the
+            // spatial criteria match: artifact CW paths from convex×convex
+            // MinkowskiDiff also have all vertices inside the outer envelope.
+            //
+            // Test on inflatedA, not on raw a: PolygonInflate's positive-delta
+            // offset preserves convexity in theory, but verifying on the
+            // actual MinkowskiDiff input keeps the contract local. The
+            // Count==1 check rules out the (impossible-for-convex-input)
+            // ClipperOffset-splits-into-pieces case; if it ever fires we
+            // fall through to the classifier.
             if (unioned != null && unioned.Count > 0)
             {
-                ApplyConcaveAwareCwFilter(unioned, srcOrientationIndex, candOrientationIndex);
+                bool inflatedAConvex = inflatedA.Count == 1 && inflatedA[0].IsConvex;
+                bool bothConvex = inflatedAConvex && b.IsConvex;
+
+                if (bothConvex)
+                {
+                    ApplyConvexBlanketReverse(unioned);
+                }
+                else
+                {
+                    ApplyConcaveAwareCwFilter(unioned, srcOrientationIndex, candOrientationIndex);
+                }
             }
 
             if (unioned == null || unioned.Count == 0)
@@ -255,38 +277,29 @@ namespace SeaNest.Nesting.Core.Nesting
                 if (signed >= 0) continue; // CCW non-outer (e.g. island in a hole) — keep as-is.
 
                 double absArea = -signed;
-                bool slivered = absArea < noiseThreshold;
 
-                // PIP vote breakdown. Always counts INSIDE / ON / OUTSIDE for
-                // every vertex (no short-circuit) so the classification log can
-                // report the full vote — needed for diagnosing why convex inputs
-                // ended up classified as holes.
-                var cw = unioned[i];
-                int verts = cw.Count;
-                int votesInside = 0, votesOn = 0, votesOutside = 0;
-                if (!slivered)
-                {
-                    for (int v = 0; v < verts; v++)
-                    {
-                        var pip = Clipper.PointInPolygon(cw[v], outerPath);
-                        if (pip == PointInPolygonResult.IsOutside) votesOutside++;
-                        else if (pip == PointInPolygonResult.IsOn) votesOn++;
-                        else votesInside++;
-                    }
-                }
-                bool allInside = votesOutside == 0;
-
-                string classification;
-                if (slivered)
+                if (absArea < noiseThreshold)
                 {
                     unioned[i].Reverse();
                     SliverReversalsTotal++;
-                    classification = "SLIVER";
+                    continue;
                 }
-                else if (allInside)
+
+                // Legitimate-hole vs anomaly: short-circuit on first IsOutside.
+                bool allInside = true;
+                var cw = unioned[i];
+                for (int v = 0; v < cw.Count; v++)
+                {
+                    if (Clipper.PointInPolygon(cw[v], outerPath) == PointInPolygonResult.IsOutside)
+                    {
+                        allInside = false;
+                        break;
+                    }
+                }
+
+                if (allInside)
                 {
                     HolesPreservedTotal++;
-                    classification = "HOLE";
                     // Keep CW; FillRule.Positive will subtract it from the union downstream.
                 }
                 else
@@ -297,19 +310,28 @@ namespace SeaNest.Nesting.Core.Nesting
                         $"CW path (verts={cw.Count}, area={absArea:G6}) had vertex outside outer envelope; " +
                         $"reversed defensively.");
                     unioned[i].Reverse();
-                    classification = "ANOMALY";
                 }
+            }
+        }
 
-                ClassificationLog?.Invoke(
-                    $"  NFP CW classify: src-orient={srcOrientationIndex} cand-orient={candOrientationIndex} | " +
-                    $"cw.area={absArea:G6}, outer.area={outerArea:G6}, " +
-                    $"threshold={noiseThreshold:G6} (= max({SliverFractionOfOuter:G3}×outer, {SliverAbsoluteFloor:G3})) | " +
-                    $"sliver-test ({absArea:G6} < {noiseThreshold:G6}) = {(slivered ? "TRUE" : "false")} | " +
-                    $"verts={verts}" +
-                    (slivered
-                        ? " (PIP not run — sliver short-circuit)"
-                        : $" (inside={votesInside}, on={votesOn}, outside={votesOutside})") +
-                    $" | -> {classification}");
+        /// <summary>
+        /// Walk <paramref name="unioned"/> in place and reverse every CW path
+        /// to CCW. Used when both NFP inputs are convex: their Minkowski
+        /// difference is mathematically convex, so any CW sub-loop in the
+        /// Union output is necessarily a numerical artifact of the per-quad
+        /// integer arithmetic — never a real hole. No threshold or PIP test
+        /// needed; that machinery is for the concave case where the NFP
+        /// can legitimately have holes.
+        /// </summary>
+        private static void ApplyConvexBlanketReverse(Paths64 unioned)
+        {
+            for (int i = 0; i < unioned.Count; i++)
+            {
+                if (Clipper.Area(unioned[i]) < 0)
+                {
+                    unioned[i].Reverse();
+                    SliverReversalsTotal++;
+                }
             }
         }
     }
