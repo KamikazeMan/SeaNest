@@ -84,6 +84,15 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         public static Action<string> AnomalyLog { get; set; }
 
+        /// <summary>
+        /// Optional per-CW classification diagnostic sink. When wired, every
+        /// CW path encountered emits one line with the area numbers, the
+        /// threshold computation, the PIP vote breakdown, and the final
+        /// SLIVER / HOLE / ANOMALY verdict. Used to diagnose classifier
+        /// behavior on real inputs; verbose, intended for diagnostic runs.
+        /// </summary>
+        public static Action<string> ClassificationLog { get; set; }
+
         /// <summary>Reset all counters. Call once at the start of a nest run.</summary>
         public static void ResetCounters()
         {
@@ -246,30 +255,38 @@ namespace SeaNest.Nesting.Core.Nesting
                 if (signed >= 0) continue; // CCW non-outer (e.g. island in a hole) — keep as-is.
 
                 double absArea = -signed;
+                bool slivered = absArea < noiseThreshold;
 
-                if (absArea < noiseThreshold)
+                // PIP vote breakdown. Always counts INSIDE / ON / OUTSIDE for
+                // every vertex (no short-circuit) so the classification log can
+                // report the full vote — needed for diagnosing why convex inputs
+                // ended up classified as holes.
+                var cw = unioned[i];
+                int verts = cw.Count;
+                int votesInside = 0, votesOn = 0, votesOutside = 0;
+                if (!slivered)
+                {
+                    for (int v = 0; v < verts; v++)
+                    {
+                        var pip = Clipper.PointInPolygon(cw[v], outerPath);
+                        if (pip == PointInPolygonResult.IsOutside) votesOutside++;
+                        else if (pip == PointInPolygonResult.IsOn) votesOn++;
+                        else votesInside++;
+                    }
+                }
+                bool allInside = votesOutside == 0;
+
+                string classification;
+                if (slivered)
                 {
                     unioned[i].Reverse();
                     SliverReversalsTotal++;
-                    continue;
+                    classification = "SLIVER";
                 }
-
-                // Legitimate-hole vs anomaly: test all vertices against outer envelope.
-                bool allInside = true;
-                var cw = unioned[i];
-                for (int v = 0; v < cw.Count; v++)
-                {
-                    var pip = Clipper.PointInPolygon(cw[v], outerPath);
-                    if (pip == PointInPolygonResult.IsOutside)
-                    {
-                        allInside = false;
-                        break;
-                    }
-                }
-
-                if (allInside)
+                else if (allInside)
                 {
                     HolesPreservedTotal++;
+                    classification = "HOLE";
                     // Keep CW; FillRule.Positive will subtract it from the union downstream.
                 }
                 else
@@ -280,7 +297,19 @@ namespace SeaNest.Nesting.Core.Nesting
                         $"CW path (verts={cw.Count}, area={absArea:G6}) had vertex outside outer envelope; " +
                         $"reversed defensively.");
                     unioned[i].Reverse();
+                    classification = "ANOMALY";
                 }
+
+                ClassificationLog?.Invoke(
+                    $"  NFP CW classify: src-orient={srcOrientationIndex} cand-orient={candOrientationIndex} | " +
+                    $"cw.area={absArea:G6}, outer.area={outerArea:G6}, " +
+                    $"threshold={noiseThreshold:G6} (= max({SliverFractionOfOuter:G3}×outer, {SliverAbsoluteFloor:G3})) | " +
+                    $"sliver-test ({absArea:G6} < {noiseThreshold:G6}) = {(slivered ? "TRUE" : "false")} | " +
+                    $"verts={verts}" +
+                    (slivered
+                        ? " (PIP not run — sliver short-circuit)"
+                        : $" (inside={votesInside}, on={votesOn}, outside={votesOutside})") +
+                    $" | -> {classification}");
             }
         }
     }
