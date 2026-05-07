@@ -50,7 +50,13 @@ namespace SeaNest.Nesting.Core.Nesting
         /// <see cref="NfpPlacementEngine.NestResult"/> observed across all iterations.
         /// </summary>
         /// <param name="engine">Placement engine, already constructed with orientation list and NFP cache.</param>
-        /// <param name="partCount">Number of source parts (length of the order vector).</param>
+        /// <param name="initialOrder">
+        /// Initial part-index ordering for the first placement pass. Caller supplies this
+        /// (typically largest-bbox-diagonal first via NestingEngine.BuildLargestFirstOrder)
+        /// so SA starts from the same warm seed NFP_Greedy uses, rather than burning
+        /// iterations climbing back out of an arbitrary input-order valley. Length defines
+        /// the part-count for the run.
+        /// </param>
         /// <param name="timeBudget">Wall-clock cap on total annealing work.</param>
         /// <param name="randomSeed">RNG seed for reproducibility. Same seed + same engine = same result.</param>
         /// <param name="progressCallback">
@@ -58,21 +64,20 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </param>
         public static NfpPlacementEngine.NestResult Optimize(
             NfpPlacementEngine engine,
-            int partCount,
+            IReadOnlyList<int> initialOrder,
             TimeSpan timeBudget,
             int randomSeed = 0,
             Action<double, string> progressCallback = null)
         {
             if (engine == null) throw new ArgumentNullException(nameof(engine));
-            if (partCount <= 0) throw new ArgumentException("partCount must be positive.", nameof(partCount));
+            if (initialOrder == null) throw new ArgumentNullException(nameof(initialOrder));
+            if (initialOrder.Count == 0) throw new ArgumentException("initialOrder must be non-empty.", nameof(initialOrder));
             if (timeBudget <= TimeSpan.Zero) throw new ArgumentException("timeBudget must be positive.", nameof(timeBudget));
 
             var rng = new Random(randomSeed);
             var stopwatch = Stopwatch.StartNew();
 
-            // Initial order: largest-bbox-diagonal first. Same heuristic the BLF engine
-            // uses, which gives SA a good warm start (typically within 5% of best).
-            var currentOrder = BuildInitialOrder(engine, partCount);
+            var currentOrder = new List<int>(initialOrder);
             var currentResult = engine.PlaceAll(currentOrder);
             double currentEnergy = ComputeEnergy(currentResult);
 
@@ -195,22 +200,6 @@ namespace SeaNest.Nesting.Core.Nesting
             }
 
             return energy;
-        }
-
-        // ------------------------------------------------------------------
-        // Initial order
-        // ------------------------------------------------------------------
-
-        private static List<int> BuildInitialOrder(NfpPlacementEngine engine, int partCount)
-        {
-            // Largest first by bbox diagonal — same warm start BLF uses.
-            // We don't have the polygon list here, so we use the part indices directly
-            // and let the engine sort by orientation extents. Simpler: just 0..N-1 in
-            // input order. SA will reorder anyway, and the cost of a "bad" first iteration
-            // is one extra annealing step.
-            var order = new List<int>(partCount);
-            for (int i = 0; i < partCount; i++) order.Add(i);
-            return order;
         }
 
         // ------------------------------------------------------------------

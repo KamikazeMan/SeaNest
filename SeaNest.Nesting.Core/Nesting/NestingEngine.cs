@@ -85,6 +85,10 @@ namespace SeaNest.Nesting.Core.Nesting
             // Step 4: Place parts.
             NfpPlacementEngine.NestResult result;
 
+            // Largest-bbox-diagonal first — same warm start BLF uses. Both Greedy
+            // and Annealed start from this order; Annealed then perturbs around it.
+            var initialOrder = BuildLargestFirstOrder(request.Polygons);
+
             if (useAnnealing)
             {
                 ProgressCallback?.Invoke(0.15, "Annealing...");
@@ -97,7 +101,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
                 result = SimulatedAnnealing.Optimize(
                     engine,
-                    request.Polygons.Count,
+                    initialOrder,
                     request.TimeBudget,
                     randomSeed: 0,
                     progressCallback: saProgress);
@@ -105,11 +109,7 @@ namespace SeaNest.Nesting.Core.Nesting
             else
             {
                 ProgressCallback?.Invoke(0.15, "Placing parts...");
-
-                // Greedy: largest-bbox-diagonal first, same warm-start as BLF.
-                var order = BuildLargestFirstOrder(request.Polygons);
-                result = engine.PlaceAll(order);
-
+                result = engine.PlaceAll(initialOrder);
                 ProgressCallback?.Invoke(0.95, "Finalizing...");
             }
 
