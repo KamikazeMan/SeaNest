@@ -25,8 +25,12 @@ namespace SeaNest.Nesting.Core.Nesting
         /// <summary>Total area of all placed parts (sum of absolute polygon areas).</summary>
         public double TotalPlacedArea { get; }
 
-        /// <summary>Total usable sheet area across all sheets used
-        /// (SheetCount * usableWidth * usableHeight).</summary>
+        /// <summary>
+        /// Total usable sheet area across all sheets used. Derived from
+        /// <see cref="SheetCount"/> × per-sheet usable area, so it stays consistent
+        /// with the placements-derived sheet count even if upstream sheet bookkeeping
+        /// transiently disagreed.
+        /// </summary>
         public double TotalUsableSheetArea { get; }
 
         /// <summary>Material utilization as a fraction in [0, 1]: placed area divided by usable sheet area.
@@ -37,11 +41,18 @@ namespace SeaNest.Nesting.Core.Nesting
         /// <summary>Wall-clock time the engine spent producing this result.</summary>
         public TimeSpan ElapsedTime { get; }
 
+        /// <summary>
+        /// Construct a result. <see cref="SheetCount"/> is derived from the maximum
+        /// <see cref="PlacementResult.Sheet"/> in <paramref name="placements"/> — there
+        /// is no separate sheet-count parameter, because the placements are the ground
+        /// truth. <paramref name="usableSheetArea"/> is the per-sheet usable area
+        /// (after margin inset); the total is computed internally.
+        /// </summary>
         public NestResponse(
             IReadOnlyList<PlacementResult> placements,
             IReadOnlyList<int> unplacedIndices,
             double totalPlacedArea,
-            double totalUsableSheetArea,
+            double usableSheetArea,
             TimeSpan elapsedTime)
         {
             if (placements == null) throw new ArgumentNullException(nameof(placements));
@@ -51,7 +62,7 @@ namespace SeaNest.Nesting.Core.Nesting
             UnplacedIndices = unplacedIndices;
             SheetCount = placements.Count == 0 ? 0 : placements.Max(p => p.Sheet) + 1;
             TotalPlacedArea = totalPlacedArea;
-            TotalUsableSheetArea = totalUsableSheetArea;
+            TotalUsableSheetArea = SheetCount * usableSheetArea;
             ElapsedTime = elapsedTime;
         }
 

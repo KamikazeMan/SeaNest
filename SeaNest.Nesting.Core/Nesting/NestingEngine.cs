@@ -120,7 +120,6 @@ namespace SeaNest.Nesting.Core.Nesting
 
             double totalPlacedArea = placementsSorted.Sum(p => p.PlacedPolygon.AbsoluteArea);
             double usablePerSheet = request.UsableWidth * request.UsableHeight;
-            double totalUsable = result.SheetCount * usablePerSheet;
 
             stopwatch.Stop();
             ProgressCallback?.Invoke(1.0,
@@ -130,7 +129,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 placementsSorted,
                 new List<int>(result.Unplaced),
                 totalPlacedArea,
-                totalUsable,
+                usablePerSheet,
                 stopwatch.Elapsed);
         }
 
@@ -220,7 +219,6 @@ namespace SeaNest.Nesting.Core.Nesting
 
             double totalPlacedArea = placements.Sum(p => p.PlacedPolygon.AbsoluteArea);
             double usablePerSheet = request.UsableWidth * request.UsableHeight;
-            double totalUsable = sheets.Count * usablePerSheet;
 
             stopwatch.Stop();
 
@@ -228,7 +226,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 placements,
                 unplaced,
                 totalPlacedArea,
-                totalUsable,
+                usablePerSheet,
                 stopwatch.Elapsed);
         }
 
