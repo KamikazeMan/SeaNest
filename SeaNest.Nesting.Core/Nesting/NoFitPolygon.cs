@@ -113,33 +113,86 @@ namespace SeaNest.Nesting.Core.Nesting
             // Union all NFPs from each A piece.
             Paths64 unioned = Clipper.Union(allNfpPaths, FillRule.Positive);
 
-            // Diagnostic: summarize the Union output by winding. Compare to the
-            // pre-Union quad totals above. If quads were all CCW but Union output
-            // has CW, the CW is born in Clipper.Union itself.
-            if (DiagnosticLog != null)
+            // Pre-fix winding counts (diagnostic only — measure what Union actually
+            // produced before we normalize it).
+            int preFixCcwCount = 0, preFixCwCount = 0;
+            double preFixCcwArea = 0.0, preFixCwArea = 0.0;
+            if (DiagnosticLog != null && unioned != null)
             {
-                int outCcwCount = 0, outCwCount = 0;
-                double outCcwArea = 0.0, outCwArea = 0.0;
                 double scaleSq = ClipperConvert.Scale * ClipperConvert.Scale;
+                for (int i = 0; i < unioned.Count; i++)
+                {
+                    double signed = Clipper.Area(unioned[i]) / scaleSq;
+                    if (signed >= 0) { preFixCcwCount++; preFixCcwArea += signed; }
+                    else { preFixCwCount++; preFixCwArea += -signed; }
+                }
+            }
+
+            // ------------------------------------------------------------------
+            // CW-to-CCW normalization at the Paths64 layer.
+            //
+            // Clipper2 v2.0.0's MinkowskiDiff emits CW sub-paths for certain shape
+            // pairs even when both inputs are CCW (confirmed by the NFP/Inflate
+            // attribution diagnostic — CW area appears in the raw quad set, not
+            // born inside Clipper.Union). FillRule.Positive then carries those CW
+            // paths through Union faithfully because they have nowhere to merge.
+            // Downstream NfpPlacementEngine treats them as holes in the cumulative
+            // forbidden region under FillRule.Positive, which silently re-permits
+            // exactly the placement positions occupied by already-placed parts —
+            // root cause of the engine-vs-verifier overlap bug.
+            //
+            // Fix: walk the Union output and reverse any CW path so the result is
+            // uniformly CCW. The contract documented at this class header — "NFP
+            // outputs are CCW; downstream FillRule.Positive interprets them as
+            // filled regions" — is now actually enforced by code, not just hoped
+            // for.
+            //
+            // KNOWN LIMITATION (convex-only safety): For genuinely concave A or B,
+            // some CW sub-paths in MinkowskiDiff output legitimately encode holes
+            // in the NFP — regions of (B+t) translation that DON'T cause overlap
+            // despite being spatially inside the outer NFP boundary. Blanket CW-
+            // to-CCW reversal would erase those holes, leaving over-constrained
+            // forbidden regions (no false placements, but possibly missed valid
+            // placements in tight nests). The current SeaNest test set is convex;
+            // when real concave boat parts come through, this fix needs to
+            // distinguish "spurious CW noise from MinkowskiDiff" from "legitimate
+            // CW hole encoding a concavity". Likely path: keep CW paths whose
+            // |area| exceeds a noise threshold AND whose vertices lie strictly
+            // inside the outer CCW envelope (real holes); reverse the rest.
+            // ------------------------------------------------------------------
+            if (unioned != null)
+            {
+                for (int i = 0; i < unioned.Count; i++)
+                {
+                    if (Clipper.Area(unioned[i]) < 0)
+                        unioned[i].Reverse();
+                }
+            }
+
+            // Diagnostic: emit pre-fix and post-fix winding side-by-side so the
+            // next run shows the fix actually flipped any CW that arrived. Same
+            // filter as before — only emit when CW was present somewhere
+            // pre-fix or in the raw Minkowski quads.
+            if (DiagnosticLog != null && (quadCwCount > 0 || preFixCwCount > 0))
+            {
+                int postFixCcwCount = 0, postFixCwCount = 0;
+                double postFixCcwArea = 0.0, postFixCwArea = 0.0;
                 if (unioned != null)
                 {
+                    double scaleSq = ClipperConvert.Scale * ClipperConvert.Scale;
                     for (int i = 0; i < unioned.Count; i++)
                     {
                         double signed = Clipper.Area(unioned[i]) / scaleSq;
-                        if (signed >= 0) { outCcwCount++; outCcwArea += signed; }
-                        else { outCwCount++; outCwArea += -signed; }
+                        if (signed >= 0) { postFixCcwCount++; postFixCcwArea += signed; }
+                        else { postFixCwCount++; postFixCwArea += -signed; }
                     }
                 }
 
-                // Filter: emit only when CW is present somewhere — pre-Union or
-                // post-Union — to keep the volume manageable.
-                if (quadCwCount > 0 || outCwCount > 0)
-                {
-                    DiagnosticLog.Invoke(
-                        $"  NFP a(verts={a.Count}, area={a.Area:G6}) b(verts={b.Count}, area={b.Area:G6}) spacing={spacing:G6}: " +
-                        $"quads {allNfpPaths.Count}p ({quadCcwCount}CCW area={quadCcwArea:G6} | {quadCwCount}CW area={quadCwArea:G6}) -> " +
-                        $"union {(unioned == null ? 0 : unioned.Count)}p ({outCcwCount}CCW area={outCcwArea:G6} | {outCwCount}CW area={outCwArea:G6})");
-                }
+                DiagnosticLog.Invoke(
+                    $"  NFP a(verts={a.Count}, area={a.Area:G6}) b(verts={b.Count}, area={b.Area:G6}) spacing={spacing:G6}: " +
+                    $"quads {allNfpPaths.Count}p ({quadCcwCount}CCW area={quadCcwArea:G6} | {quadCwCount}CW area={quadCwArea:G6}) -> " +
+                    $"union {(unioned == null ? 0 : unioned.Count)}p pre-fix ({preFixCcwCount}CCW area={preFixCcwArea:G6} | {preFixCwCount}CW area={preFixCwArea:G6}) " +
+                    $"post-fix ({postFixCcwCount}CCW area={postFixCcwArea:G6} | {postFixCwCount}CW area={postFixCwArea:G6})");
             }
 
             if (unioned == null || unioned.Count == 0)
