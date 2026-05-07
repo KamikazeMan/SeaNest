@@ -118,16 +118,19 @@ namespace SeaNest.Commands
             }
 
             // Wire the squish warning so users see which parts came through Squish
-            // (and will therefore have approximate dimensions).
-            BrepFlattener.SquishWarning = msg => RhinoApp.WriteLine(msg);
+            // (and will therefore have approximate dimensions). Single writer:
+            // surface every message to the user AND tally Squish hits in one place.
+            int squishedCount = 0;
+            BrepFlattener.SquishWarning = msg =>
+            {
+                if (msg == null) return;
+                RhinoApp.WriteLine(msg);
+                if (msg.Contains("Squish")) squishedCount++;
+            };
 
             var polygons = new List<Polygon>();
-            int squishedCount = 0;
             for (int i = 0; i < breps.Count; i++)
             {
-                string lastMessage = null;
-                BrepFlattener.SquishWarning = msg => lastMessage = msg;
-
                 var poly = BrepFlattener.Flatten(breps[i], doc);
                 if (poly == null)
                 {
@@ -136,10 +139,6 @@ namespace SeaNest.Commands
                 else
                 {
                     polygons.Add(poly);
-                    if (lastMessage != null && lastMessage.Contains("Squish"))
-                    {
-                        squishedCount++;
-                    }
                 }
             }
 
