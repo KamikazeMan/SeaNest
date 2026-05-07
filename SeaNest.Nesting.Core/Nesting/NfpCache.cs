@@ -71,7 +71,9 @@ namespace SeaNest.Nesting.Core.Nesting
             // one wins the GetOrAdd, the other's result is discarded. NoFitPolygon.Compute
             // is pure (no side effects), so the duplicate work is harmless and avoids
             // the more expensive lock-on-miss pattern.
-            var fresh = NoFitPolygon.Compute(a.CanonicalPolygon, b.CanonicalPolygon, _spacing);
+            var fresh = NoFitPolygon.Compute(
+                a.CanonicalPolygon, b.CanonicalPolygon, _spacing,
+                a.OrientationIndex, b.OrientationIndex);
             return _entries.GetOrAdd(key, fresh);
         }
 

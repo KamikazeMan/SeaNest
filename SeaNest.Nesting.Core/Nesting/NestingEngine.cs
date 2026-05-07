@@ -82,11 +82,30 @@ namespace SeaNest.Nesting.Core.Nesting
             var engine = new NfpPlacementEngine(request, orientationsByPart, cache);
             engine.DiagnosticLog = DiagnosticCallback;
 
-            // Reset the per-process CW-correction counter so the per-Update
-            // confidence summary in NfpPlacementEngine reports only this run's
-            // corrections.
-            NoFitPolygon.ResetCwCorrectionsCounter();
+            // Reset the concave-aware CW filter counters so the end-of-nest
+            // summary reports only this run's classifications. Wire the per-
+            // anomaly diagnostic sink so the (src-orient, cand-orient) pair of
+            // each anomaly surfaces during the run, not just in a count.
+            NoFitPolygon.ResetCounters();
+            NoFitPolygon.AnomalyLog = DiagnosticCallback;
 
+            try
+            {
+                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache);
+            }
+            finally
+            {
+                NoFitPolygon.AnomalyLog = null;
+            }
+        }
+
+        private NestResponse RunNfpInner(
+            NestRequest request,
+            Stopwatch stopwatch,
+            bool useAnnealing,
+            NfpPlacementEngine engine,
+            NfpCache cache)
+        {
             // Step 4: Place parts.
             NfpPlacementEngine.NestResult result;
 
@@ -130,18 +149,22 @@ namespace SeaNest.Nesting.Core.Nesting
             ProgressCallback?.Invoke(1.0,
                 $"Nest complete: {result.SheetCount} sheets, {result.Unplaced.Count} unplaced");
 
-            // Confidence summary: surface only when MinkowskiDiff produced CW
-            // sub-loops that NoFitPolygon.Compute had to reverse. On clean
-            // convex inputs this is zero. Non-zero values are the trigger to
-            // think hard about the convex-only safety limitation documented in
-            // NoFitPolygon — for genuinely concave parts, blanket CW reversal
-            // can erase legitimate hole encodings. Denominator (cache.Count) is
-            // the total number of unique NFPs computed during this run.
-            int corrections = NoFitPolygon.CwCorrectionsTotal;
-            if (corrections > 0)
+            // Concave-aware CW filter summary. Surfaces only when the filter
+            // touched anything during this run. Per-anomaly detail (with
+            // src-orient, cand-orient identifiers) was emitted live via
+            // AnomalyLog at the moment each anomaly was classified — this
+            // line is the run-level rollup. cache.Count is the total number
+            // of unique pairwise NFPs computed.
+            int slivers = NoFitPolygon.SliverReversalsTotal;
+            int holes = NoFitPolygon.HolesPreservedTotal;
+            int anomalies = NoFitPolygon.AnomalyReversalsTotal;
+            if (slivers > 0 || holes > 0 || anomalies > 0)
             {
                 DiagnosticCallback?.Invoke(
-                    $"NFP: corrected {corrections} CW paths to CCW (out of {cache.Count} NFPs computed)");
+                    $"NFP: {cache.Count} pairs computed, " +
+                    $"{slivers} slivers reversed, " +
+                    $"{holes} holes preserved, " +
+                    $"{anomalies} anomalies");
             }
 
             return new NestResponse(

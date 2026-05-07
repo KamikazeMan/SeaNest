@@ -125,6 +125,23 @@ namespace SeaNest.Nesting.Core.Nesting
         // Per-sheet placement
         // ------------------------------------------------------------------
 
+        /// <summary>
+        /// Wall-clock cap on a single TryPlaceOnSheet call. Catches Clipper2
+        /// degenerate-input loops and runaway NFP computations that previously
+        /// produced multi-minute hangs on real boat-part inputs. Hardcoded for
+        /// now; promote to NestRequest if user-configurable becomes useful.
+        /// </summary>
+        private const int TryPlaceOnSheetTimeBudgetSeconds = 30;
+
+        /// <summary>
+        /// Sanity bound on the BL vertex picked from the feasible region. Catches
+        /// numerical breakdowns where Clipper.Difference output included vertices
+        /// far outside the IFP rectangle (we observed 132M+ inches on a 96-inch
+        /// sheet during early concave-geometry testing). 10× sheet dimensions
+        /// is well past any legitimate placement and well below typical garbage.
+        /// </summary>
+        private const double BLVertexSanityFactor = 10.0;
+
         private bool TryPlaceOnSheet(
     int partIndex,
     List<OrientedPart> orientations,
@@ -142,8 +159,23 @@ namespace SeaNest.Nesting.Core.Nesting
             int orientationsFit = 0;
             var sw = new System.Diagnostics.Stopwatch();
 
+            // Per-attempt time budget. Checked once per orientation; fires hard
+            // if exceeded so a runaway part can't hang the whole nest.
+            var attemptStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var timeBudget = System.TimeSpan.FromSeconds(TryPlaceOnSheetTimeBudgetSeconds);
+
             foreach (var orientation in orientations)
             {
+                if (attemptStopwatch.Elapsed > timeBudget)
+                {
+                    throw new System.InvalidOperationException(
+                        $"Part {partIndex} timed out in TryPlaceOnSheet after " +
+                        $"{attemptStopwatch.Elapsed.TotalSeconds:F1}s on sheet {sheetIdx} " +
+                        $"({orientationsTried}/{orientations.Count} orientations attempted, " +
+                        $"{orientationsFit} fit, best={(best != null ? "yes" : "no")}). " +
+                        $"Possibly malformed input geometry — Clipper2 stuck on degenerate Minkowski input.");
+                }
+
                 orientationsTried++;
 
                 var ifp = InnerFitPolygon.Compute(
@@ -200,6 +232,36 @@ namespace SeaNest.Nesting.Core.Nesting
 
 
             if (best == null) return false;
+
+            // Sanity bound on the chosen BL vertex. If Clipper.Difference produced
+            // escaped vertices far outside the IFP rectangle (numerical breakdown
+            // on degenerate concave Minkowski input), the BL vertex selection
+            // latches onto numerical-infinity coordinates. Throw with full context
+            // so we can reverse-engineer which (orientation, source-shape) pair
+            // tripped the bound if it ever fires.
+            double bxLimit = BLVertexSanityFactor * _request.SheetWidth;
+            double byLimit = BLVertexSanityFactor * _request.SheetHeight;
+            if (System.Math.Abs(best.X) > bxLimit || System.Math.Abs(best.Y) > byLimit)
+            {
+                var candBBox = best.Orientation.CanonicalPolygon.BoundingBox;
+                var sanityIfp = InnerFitPolygon.Compute(
+                    best.Orientation, _request.SheetWidth, _request.SheetHeight, _request.Margin);
+                string ifpStr = sanityIfp.HasValue
+                    ? $"[{sanityIfp.Value.MinX:F3},{sanityIfp.Value.MinY:F3}]-[{sanityIfp.Value.MaxX:F3},{sanityIfp.Value.MaxY:F3}]"
+                    : "(no-fit)";
+
+                throw new System.InvalidOperationException(
+                    $"NFP placement produced out-of-bounds BL vertex ({best.X:G6}, {best.Y:G6}) " +
+                    $"for part {partIndex}, orientation {best.Orientation.OrientationIndex} " +
+                    $"(rot={best.Orientation.RotationDeg:F0}{(best.Orientation.IsMirrored ? "m" : "")}, " +
+                    $"src-part={best.Orientation.SourcePartIndex}), sheet {sheetIdx}. " +
+                    $"Sheet is {_request.SheetWidth}×{_request.SheetHeight}; " +
+                    $"limit is {BLVertexSanityFactor}× sheet dimensions. " +
+                    $"Candidate canonical bbox=[{candBBox.MinX:F3},{candBBox.MinY:F3}]-[{candBBox.MaxX:F3},{candBBox.MaxY:F3}]; " +
+                    $"IFP={ifpStr}. " +
+                    $"Likely concave geometry triggering CW-handling breakdown (check NFP anomalies emitted earlier). " +
+                    $"Aborting nest.");
+            }
 
             var placedPolygon = best.Orientation.CanonicalPolygon.Translate(best.X, best.Y);
 
