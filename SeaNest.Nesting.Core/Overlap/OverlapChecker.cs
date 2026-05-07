@@ -54,8 +54,22 @@ namespace SeaNest.Nesting.Core.Overlap
         /// </summary>
         public static bool Overlaps(Polygon a, Polygon b, double tolerance = DefaultTolerance)
         {
+            double area = IntersectionArea(a, b);
+            double areaThreshold = tolerance * tolerance;
+            return area > areaThreshold;
+        }
+
+        /// <summary>
+        /// Return the area of the geometric intersection of <paramref name="a"/> and
+        /// <paramref name="b"/> in model units. Zero if the bounding boxes don't overlap
+        /// or Clipper finds no intersection. Used by <see cref="Overlaps"/> for the
+        /// verdict and exposed separately so diagnostic code can read the raw area
+        /// alongside the threshold-based verdict.
+        /// </summary>
+        public static double IntersectionArea(Polygon a, Polygon b)
+        {
             if (!a.BoundingBox.Intersects(b.BoundingBox))
-                return false;
+                return 0.0;
 
             var subject = new Paths64 { ToPath64(a) };
             var clip = new Paths64 { ToPath64(b) };
@@ -63,7 +77,7 @@ namespace SeaNest.Nesting.Core.Overlap
             var solution = Clipper.Intersect(subject, clip, FillRule.NonZero);
 
             if (solution == null || solution.Count == 0)
-                return false;
+                return 0.0;
 
             double scaledArea = 0.0;
             for (int i = 0; i < solution.Count; i++)
@@ -73,10 +87,7 @@ namespace SeaNest.Nesting.Core.Overlap
                 scaledArea += a2;
             }
 
-            double modelArea = scaledArea / (ClipperScale * ClipperScale);
-            double areaThreshold = tolerance * tolerance;
-
-            return modelArea > areaThreshold;
+            return scaledArea / (ClipperScale * ClipperScale);
         }
 
         /// <summary>

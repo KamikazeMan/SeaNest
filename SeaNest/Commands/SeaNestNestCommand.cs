@@ -198,6 +198,10 @@ namespace SeaNest.Commands
                 if (dialog.Visible) dialog.Close();
             }
 
+            // Diagnostic: print every overlapping (or near-overlapping) pair the verifier
+            // sees, with bbox + intersection area. Helps narrow engine-vs-verifier
+            // disagreement to a specific pair when verification fails.
+            FinalVerifier.DiagnosticCallback = msg => RhinoApp.WriteLine(msg);
             var verification = FinalVerifier.Verify(response.Placements);
             if (!verification.IsValid)
             {
