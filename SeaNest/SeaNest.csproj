@@ -27,8 +27,4 @@
     <ProjectReference Include="..\SeaNest.Nesting.Core\SeaNest.Nesting.Core.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Folder Include="RhinoAdapters\" />
-  </ItemGroup>
-
 </Project>
