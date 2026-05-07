@@ -162,43 +162,6 @@ namespace SeaNest.Nesting.Core.Nesting
                 sw.Stop();
                 tFeasible += sw.ElapsedMilliseconds;
 
-                // Per-attempt diagnostic — drives the engine-vs-verifier overlap
-                // diagnosis. Emits exactly when DiagnosticLog is wired AND there is
-                // at least one part already placed on this sheet (the case we're
-                // hunting). For the first part on a sheet, forbidden is trivially
-                // empty by design and the diagnostic noise isn't useful.
-                if (DiagnosticLog != null && sheet.Placed.Count > 0)
-                {
-                    DescribePaths64(forbidden, out int forbPaths, out int forbVerts,
-                        out double forbAreaCcw, out double forbAreaCw,
-                        out double forbMinX, out double forbMinY,
-                        out double forbMaxX, out double forbMaxY);
-                    DescribePaths64(feasible, out int feasPaths, out int feasVerts,
-                        out double feasAreaCcw, out double feasAreaCw,
-                        out double feasMinX, out double feasMinY,
-                        out double feasMaxX, out double feasMaxY);
-
-                    // Decisive test: is the IFP min corner geometrically inside the
-                    // forbidden region? If yes, Clipper.Difference must have clipped it
-                    // and the BL vertex cannot be (IFP.MinX, IFP.MinY) — UNLESS Clipper
-                    // is leaving it intact (Clipper bug or fill-rule edge case).
-                    // If no, the forbidden region is mis-positioned and the IFP corner
-                    // legitimately survives the carve.
-                    string ifpCornerVerdict = ForbiddenContainsPoint(forbidden, ifpBox.MinX, ifpBox.MinY)
-                        ? "INSIDE-forbidden"
-                        : "OUTSIDE-forbidden";
-
-                    DiagnosticLog.Invoke(
-                        $"  Attempt p{partIndex}/o{orientation.OrientationIndex} sheet{sheetIdx} " +
-                        $"rot{orientation.RotationDeg:F0}{(orientation.IsMirrored ? "m" : "")} " +
-                        $"IFP=[{ifpBox.MinX:F3},{ifpBox.MinY:F3}]-[{ifpBox.MaxX:F3},{ifpBox.MaxY:F3}] " +
-                        $"forb={{paths={forbPaths}, verts={forbVerts}, areaCCW={forbAreaCcw:G6}, areaCW={forbAreaCw:G6}, " +
-                        $"bbox=[{forbMinX:F3},{forbMinY:F3}]-[{forbMaxX:F3},{forbMaxY:F3}]}} " +
-                        $"feas={{paths={feasPaths}, verts={feasVerts}, areaCCW={feasAreaCcw:G6}, areaCW={feasAreaCw:G6}, " +
-                        $"bbox=[{feasMinX:F3},{feasMinY:F3}]-[{feasMaxX:F3},{feasMaxY:F3}]}} " +
-                        $"IFPcorner={ifpCornerVerdict}");
-                }
-
                 if (feasible.Count == 0) continue;
 
                 sw.Restart();
@@ -239,27 +202,6 @@ namespace SeaNest.Nesting.Core.Nesting
             if (best == null) return false;
 
             var placedPolygon = best.Orientation.CanonicalPolygon.Translate(best.X, best.Y);
-
-            // Reference-point sanity check at placement commit. Three values that
-            // should agree on the part's anchor:
-            //   canon.BBox.Min  — should be (0, 0) by OrientedPart.Build's MoveToOrigin.
-            //   chosen BL       — engine's pick from the feasible region's vertices.
-            //   placed.BBox.Min — should equal chosen BL after Translate(X, Y).
-            // If chosen BL differs from placed.BBox.Min by anything other than (0, 0),
-            // the canonical polygon's bbox-min isn't actually at origin and the entire
-            // placement convention is off by that delta — which is exactly the
-            // reference-point bug we're hunting.
-            if (DiagnosticLog != null && sheet.Placed.Count > 0)
-            {
-                var canonBBox = best.Orientation.CanonicalPolygon.BoundingBox;
-                var placedBBox = placedPolygon.BoundingBox;
-                DiagnosticLog.Invoke(
-                    $"  Commit p{partIndex}/o{best.Orientation.OrientationIndex} sheet{sheetIdx} " +
-                    $"BL=({best.X:F4},{best.Y:F4}) " +
-                    $"canon.BBox.Min=({canonBBox.MinX:F4},{canonBBox.MinY:F4}) " +
-                    $"placed.BBox.Min=({placedBBox.MinX:F4},{placedBBox.MinY:F4}) " +
-                    $"deltaBLvsPlaced=({best.X - placedBBox.MinX:F4},{best.Y - placedBBox.MinY:F4})");
-            }
 
             var rotRad = best.Orientation.RotationDeg * System.Math.PI / 180.0;
             var sourcePoly = _request.Polygons[partIndex];
@@ -355,24 +297,14 @@ namespace SeaNest.Nesting.Core.Nesting
     PlacedItem newlyPlaced,
     SheetState sheet)
         {
-            var sw = new System.Diagnostics.Stopwatch();
-            long totalNfp = 0;
-            long totalUnion = 0;
-            int orientationsProcessed = 0;
-            int totalNfpVerts = 0;
+            int correctionsBefore = NoFitPolygon.CwCorrectionsTotal;
 
             foreach (var perPart in _orientationsByPart)
             {
                 foreach (var candidate in perPart)
                 {
-                    sw.Restart();
                     var nfp = _nfpCache.Get(newlyPlaced.Orientation, candidate);
-                    sw.Stop();
-                    totalNfp += sw.ElapsedMilliseconds;
-
                     if (nfp.Count == 0) continue;
-
-                    foreach (var nfpPoly in nfp) totalNfpVerts += nfpPoly.Count;
 
                     var newPaths = new Paths64();
                     foreach (var nfpPoly in nfp)
@@ -390,68 +322,20 @@ namespace SeaNest.Nesting.Core.Nesting
                     var merged = new Paths64(existing);
                     merged.AddRange(newPaths);
 
-                    // Step 1 diagnostic: characterize merged inputs by winding BEFORE
-                    // Union. If inputs include CW paths, the source of CW is upstream
-                    // (cached forbidden from a prior Union iteration, or NFP itself).
-                    int mergedCcwCount = 0, mergedCwCount = 0;
-                    double mergedCcwArea = 0.0, mergedCwArea = 0.0;
-                    if (DiagnosticLog != null)
-                    {
-                        double scaleSq = ClipperConvert.Scale * ClipperConvert.Scale;
-                        for (int mi = 0; mi < merged.Count; mi++)
-                        {
-                            double a = Clipper.Area(merged[mi]) / scaleSq;
-                            if (a >= 0) { mergedCcwCount++; mergedCcwArea += a; }
-                            else { mergedCwCount++; mergedCwArea += -a; }
-                        }
-                    }
-
-                    sw.Restart();
-                    var unioned = Clipper.Union(merged, FillRule.Positive);
-                    sheet.ForbiddenByOrientation[candidate.OrientationIndex] = unioned;
-                    sw.Stop();
-                    totalUnion += sw.ElapsedMilliseconds;
-
-                    // Step 1 diagnostic: characterize Union OUTPUT by winding. Compare
-                    // to inputs above. If inputs were all CCW but output has CW, the
-                    // CW is born inside Clipper.Union (likely a self-touching artifact
-                    // of nearly-coincident edges). If inputs already had CW, the source
-                    // is upstream — the CW was carried in from a prior Update iteration.
-                    if (DiagnosticLog != null)
-                    {
-                        int outCcwCount = 0, outCwCount = 0;
-                        double outCcwArea = 0.0, outCwArea = 0.0;
-                        double scaleSq = ClipperConvert.Scale * ClipperConvert.Scale;
-                        for (int oi = 0; oi < unioned.Count; oi++)
-                        {
-                            double a = Clipper.Area(unioned[oi]) / scaleSq;
-                            if (a >= 0) { outCcwCount++; outCcwArea += a; }
-                            else { outCwCount++; outCwArea += -a; }
-                        }
-
-                        // Filter: log only when CW is present anywhere — input or
-                        // output. Skips the (large majority) of clean Unions to keep
-                        // the log readable.
-                        if (mergedCwCount > 0 || outCwCount > 0)
-                        {
-                            DiagnosticLog.Invoke(
-                                $"  Union after-place src{newlyPlaced.Orientation.SourcePartIndex} " +
-                                $"for cand-o{candidate.OrientationIndex}: " +
-                                $"in {merged.Count}p ({mergedCcwCount}CCW area={mergedCcwArea:G6} | " +
-                                $"{mergedCwCount}CW area={mergedCwArea:G6}) -> " +
-                                $"out {unioned.Count}p ({outCcwCount}CCW area={outCcwArea:G6} | " +
-                                $"{outCwCount}CW area={outCwArea:G6})");
-                        }
-                    }
-
-                    orientationsProcessed++;
+                    sheet.ForbiddenByOrientation[candidate.OrientationIndex]
+                        = Clipper.Union(merged, FillRule.Positive);
                 }
             }
 
-            DiagnosticLog?.Invoke(
-                $"  UpdateForbidden: {orientationsProcessed} orientations, " +
-                $"NFP {totalNfp}ms (totalVerts {totalNfpVerts}), " +
-                $"Union {totalUnion}ms");
+            // Confidence summary: surface only when fresh NFP computations during
+            // this Update reversed CW paths to CCW. On clean convex inputs this
+            // count is zero after the cache warms up; non-zero values are
+            // expected on real concave boat-part inputs (Clipper2 MinkowskiDiff
+            // emits CW sub-loops for some shape pairs — see NoFitPolygon for
+            // the fix and the convex-only safety limitation).
+            int delta = NoFitPolygon.CwCorrectionsTotal - correctionsBefore;
+            if (delta > 0)
+                DiagnosticLog?.Invoke($"  UpdateForbidden corrected {delta} CW paths to CCW");
         }
 
         /// <summary>
@@ -530,83 +414,6 @@ namespace SeaNest.Nesting.Core.Nesting
             }
 
             return found ? ((double, double)?)(bestX, bestY) : null;
-        }
-
-        /// <summary>
-        /// Diagnostic helper: summarize a Paths64 region. Reports separate CCW and CW
-        /// area totals so the caller can immediately see if a region is "filled" only
-        /// by CW paths (which FillRule.Positive would treat as empty) or by CCW paths
-        /// (which FillRule.Positive would treat as filled). Areas in model units.
-        /// Also returns the bbox (min/max) of all vertices so the caller can see the
-        /// region's extent in world coordinates.
-        /// </summary>
-        private static void DescribePaths64(
-            Paths64 paths,
-            out int pathCount,
-            out int vertexCount,
-            out double areaCcw,
-            out double areaCw,
-            out double minX,
-            out double minY,
-            out double maxX,
-            out double maxY)
-        {
-            pathCount = paths == null ? 0 : paths.Count;
-            vertexCount = 0;
-            areaCcw = 0.0;
-            areaCw = 0.0;
-            minX = double.PositiveInfinity;
-            minY = double.PositiveInfinity;
-            maxX = double.NegativeInfinity;
-            maxY = double.NegativeInfinity;
-            if (paths == null || paths.Count == 0) return;
-            double scaleSq = ClipperConvert.Scale * ClipperConvert.Scale;
-            for (int i = 0; i < paths.Count; i++)
-            {
-                var p = paths[i];
-                vertexCount += p.Count;
-                double signedArea = Clipper.Area(p) / scaleSq; // signed; CCW = positive
-                if (signedArea >= 0) areaCcw += signedArea;
-                else areaCw += -signedArea;
-                for (int j = 0; j < p.Count; j++)
-                {
-                    double x = p[j].X / ClipperConvert.Scale;
-                    double y = p[j].Y / ClipperConvert.Scale;
-                    if (x < minX) minX = x;
-                    if (y < minY) minY = y;
-                    if (x > maxX) maxX = x;
-                    if (y > maxY) maxY = y;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Geometric point-in-polygon test against a Paths64 region using Clipper2's
-        /// even-odd interior convention. Returns true if (x, y) is strictly inside or
-        /// on the boundary of any path in <paramref name="paths"/>. Diagnostic-only —
-        /// the engine doesn't use this anywhere; it just lets the caller verify whether
-        /// the IFP corner is geometrically covered by the forbidden union, independent
-        /// of whether Clipper.Difference saw fit to clip it.
-        /// </summary>
-        private static bool ForbiddenContainsPoint(Paths64 paths, double x, double y)
-        {
-            if (paths == null || paths.Count == 0) return false;
-            long ix = (long)(x * ClipperConvert.Scale);
-            long iy = (long)(y * ClipperConvert.Scale);
-            var pt = new Point64(ix, iy);
-            // Sum windings across all paths so a CCW outer + CW hole correctly cancel.
-            int totalWinding = 0;
-            for (int i = 0; i < paths.Count; i++)
-            {
-                var pip = Clipper.PointInPolygon(pt, paths[i]);
-                if (pip == PointInPolygonResult.IsOn) return true;
-                if (pip == PointInPolygonResult.IsInside)
-                {
-                    double signedArea = Clipper.Area(paths[i]);
-                    totalWinding += signedArea >= 0 ? 1 : -1;
-                }
-            }
-            return totalWinding > 0;
         }
 
         // ------------------------------------------------------------------

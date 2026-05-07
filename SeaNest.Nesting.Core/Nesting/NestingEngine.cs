@@ -82,25 +82,10 @@ namespace SeaNest.Nesting.Core.Nesting
             var engine = new NfpPlacementEngine(request, orientationsByPart, cache);
             engine.DiagnosticLog = DiagnosticCallback;
 
-            // Wire upstream static diagnostic sinks for the NFP-source attribution
-            // run. Both logs are filtered to emit only when CW appears in their
-            // output, so no noise on the clean-input fast path. Cleared at the end
-            // of the run so subsequent commands don't see stale wiring.
-            SeaNest.Nesting.Core.Overlap.PolygonInflate.DiagnosticLog = DiagnosticCallback;
-            NoFitPolygon.DiagnosticLog = DiagnosticCallback;
-            try
-            {
-                return RunNfp(request, stopwatch, useAnnealing, engine);
-            }
-            finally
-            {
-                SeaNest.Nesting.Core.Overlap.PolygonInflate.DiagnosticLog = null;
-                NoFitPolygon.DiagnosticLog = null;
-            }
-        }
-
-        private NestResponse RunNfp(NestRequest request, Stopwatch stopwatch, bool useAnnealing, NfpPlacementEngine engine)
-        {
+            // Reset the per-process CW-correction counter so the per-Update
+            // confidence summary in NfpPlacementEngine reports only this run's
+            // corrections.
+            NoFitPolygon.ResetCwCorrectionsCounter();
 
             // Step 4: Place parts.
             NfpPlacementEngine.NestResult result;

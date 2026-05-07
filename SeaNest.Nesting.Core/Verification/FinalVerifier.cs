@@ -100,13 +100,13 @@ namespace SeaNest.Nesting.Core.Verification
                         double area = OverlapChecker.IntersectionArea(a.PlacedPolygon, b.PlacedPolygon);
                         bool overlaps = area > areaThreshold;
 
-                        if (diag != null && area > 0.0)
+                        if (diag != null && overlaps)
                         {
                             var ba = a.PlacedPolygon.BoundingBox;
                             var bb = b.PlacedPolygon.BoundingBox;
                             diag(
                                 $"FinalVerifier pair: parts {a.OriginalIndex}/{b.OriginalIndex} sheet {a.Sheet} | " +
-                                $"area={area:G6} threshold={areaThreshold:G6} verdict={(overlaps ? "OVERLAP" : "ok-below-threshold")} | " +
+                                $"area={area:G6} threshold={areaThreshold:G6} | " +
                                 $"A bbox=[{ba.MinX:F4},{ba.MinY:F4}]-[{ba.MaxX:F4},{ba.MaxY:F4}] | " +
                                 $"B bbox=[{bb.MinX:F4},{bb.MinY:F4}]-[{bb.MaxX:F4},{bb.MaxY:F4}]");
                         }
