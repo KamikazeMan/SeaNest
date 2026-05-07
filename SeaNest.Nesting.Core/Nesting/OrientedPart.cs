@@ -111,6 +111,21 @@ namespace SeaNest.Nesting.Core.Nesting
             working = working.MoveToOrigin();
             working = working.ToCounterClockwise();
 
+            // Hard invariant: every CanonicalPolygon must be CCW. The entire NFP pipeline
+            // (NoFitPolygon, NfpPlacementEngine) standardizes on FillRule.Positive on the
+            // strength of this guarantee. A CCW failure here means the source polygon was
+            // degenerate (zero signed area, e.g. all-collinear points) and ToCounterClockwise
+            // had nothing to flip. Failing fast with a clear message is far better than
+            // letting Positive-rule Clipper ops silently produce empty forbidden regions
+            // downstream and corrupt the nest.
+            if (!working.IsCounterClockwise)
+            {
+                throw new InvalidOperationException(
+                    $"OrientedPart.Build: source part {sourcePartIndex} produced a non-CCW canonical " +
+                    $"polygon after normalization (signed area = {working.Area:G6}). " +
+                    "This usually means the input polygon is degenerate (zero area / collinear vertices).");
+            }
+
             return new OrientedPart(orientationIndex, sourcePartIndex, rotationDeg, isMirrored, working);
         }
 

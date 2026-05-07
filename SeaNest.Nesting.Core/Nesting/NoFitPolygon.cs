@@ -6,6 +6,28 @@ using SeaNest.Nesting.Core.Overlap;
 
 namespace SeaNest.Nesting.Core.Nesting
 {
+    /// <summary>
+    /// Compute the No-Fit Polygon of two oriented parts via Clipper2's MinkowskiDiff.
+    ///
+    /// FillRule contract:
+    ///   This class and the rest of the NFP pipeline (NfpPlacementEngine) use
+    ///   <see cref="FillRule.Positive"/> because all inputs are guaranteed CCW:
+    ///     - <see cref="OrientedPart.Build"/> forces ToCounterClockwise on every
+    ///       CanonicalPolygon and asserts the result.
+    ///     - PolygonInflate.Inflate of a CCW polygon yields a CCW outer loop.
+    ///     - Clipper2's MinkowskiDiff outputs are conventionally CCW for the outer
+    ///       boundary; CW sub-loops, when present, encode holes — exactly what
+    ///       FillRule.Positive interprets correctly.
+    ///   Positive lets the union/difference machinery treat CW sub-paths as holes
+    ///   (subtracted from the outer fill) without an explicit hole-detection pass.
+    ///
+    ///   Do NOT change to FillRule.NonZero without auditing how MinkowskiDiff output
+    ///   self-touching paths interact with hole encoding — NonZero would treat CW
+    ///   sub-loops as additional positive-fill regions, potentially over-filling the
+    ///   forbidden region and rejecting valid placements. The OverlapChecker
+    ///   deliberately uses NonZero for the opposite reason (mixed-winding inputs);
+    ///   the asymmetry is intentional and documented at OverlapChecker class level.
+    /// </summary>
     public static class NoFitPolygon
     {
         /// <summary>

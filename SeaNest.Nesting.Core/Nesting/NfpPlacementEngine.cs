@@ -26,6 +26,16 @@ namespace SeaNest.Nesting.Core.Nesting
     /// Engine is single-pass and stateful per call — <see cref="PlaceAll"/> consumes a
     /// part order and returns a complete result. Simulated annealing wraps this method,
     /// calling it many times with perturbed orderings.
+    ///
+    /// FillRule contract:
+    ///   Every Clipper2 boolean in this file uses <see cref="FillRule.Positive"/>.
+    ///   Inputs to this engine are <see cref="OrientedPart.CanonicalPolygon"/>s, which
+    ///   <see cref="OrientedPart.Build"/> forces to CCW (and asserts). NFP outputs from
+    ///   <see cref="NoFitPolygon"/> inherit that CCW outer winding; any CW sub-loops
+    ///   encode holes that Positive correctly subtracts from the union. See
+    ///   <see cref="NoFitPolygon"/> for the matching FillRule rationale, and
+    ///   <see cref="Overlap.OverlapChecker"/> for why the overlap-detection path
+    ///   deliberately uses NonZero instead.
     /// </summary>
     public sealed class NfpPlacementEngine
     {

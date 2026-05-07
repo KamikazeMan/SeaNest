@@ -14,6 +14,23 @@ namespace SeaNest.Nesting.Core.Overlap
     ///
     /// Internally scales doubles into Clipper's long coordinate space at <see cref="ClipperScale"/>
     /// precision (0.0001 units), which is far finer than any real sheet-metal tolerance.
+    ///
+    /// FillRule contract:
+    ///   This class uses <see cref="FillRule.NonZero"/> because its inputs are
+    ///   user-provided polygons of arbitrary winding:
+    ///     - BLF's normalized parts inherit the source polygon's winding (no
+    ///       ToCounterClockwise pass — see NestingEngine.NestBLF).
+    ///     - PolygonInflate.Inflate preserves the input's winding sign.
+    ///     - FinalVerifier sees the PlacedPolygon, which is CCW for the NFP path
+    ///       but mixed-winding for the BLF path.
+    ///   NonZero handles convex/concave/holed inputs correctly regardless of winding.
+    ///
+    ///   Do NOT change to FillRule.Positive without first enforcing CCW everywhere
+    ///   upstream of OverlapChecker — Positive treats CW-wound polygons as empty and
+    ///   would silently make Overlaps return false for any CW input. The NFP pipeline
+    ///   in NoFitPolygon and NfpPlacementEngine deliberately uses Positive for the
+    ///   opposite reason (CCW-guaranteed inputs, holes encoded as CW). The asymmetry
+    ///   is intentional; see those files for the matching half of this argument.
     /// </summary>
     public static class OverlapChecker
     {
