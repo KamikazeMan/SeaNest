@@ -301,22 +301,6 @@ namespace SeaNest.Nesting.Core.Geometry
         /// where the resulting chord stays within <paramref name="tolerance"/> of the
         /// original polyline.
         ///
-        /// Use this for NFP outputs and Squish-meshed inputs where dense vertex runs
-        /// approximate arcs (rat holes, slot fillets). Tolerance is the maximum
-        /// perpendicular distance from a removed vertex to the chord that replaces
-        /// the segment containing it. At sheet-metal CAM tolerances (0.005-0.01"),
-        /// rat-hole arcs go from ~20 vertices to ~4 with no visible deviation.
-        ///
-        /// Slot tab corners are sharp and far from any chord — they survive DP at
-        /// any reasonable tolerance.
-        /// </summary>
-        /// <summary>
-        /// Return a new polygon simplified using the Ramer-Douglas-Peucker algorithm.
-        /// More aggressive than <see cref="Simplify"/>: where Simplify only removes
-        /// near-collinear vertices, DP also removes vertices on arc approximations
-        /// where the resulting chord stays within <paramref name="tolerance"/> of the
-        /// original polyline.
-        ///
         /// Use this for inputs where dense vertex runs approximate arcs (rat holes,
         /// slot fillets, hull curves). At sheet-metal CAM tolerances (0.005-0.01"),
         /// rat-hole arcs go from ~20 vertices to ~4 with no visible deviation.
