@@ -390,11 +390,59 @@ namespace SeaNest.Nesting.Core.Nesting
                     var merged = new Paths64(existing);
                     merged.AddRange(newPaths);
 
+                    // Step 1 diagnostic: characterize merged inputs by winding BEFORE
+                    // Union. If inputs include CW paths, the source of CW is upstream
+                    // (cached forbidden from a prior Union iteration, or NFP itself).
+                    int mergedCcwCount = 0, mergedCwCount = 0;
+                    double mergedCcwArea = 0.0, mergedCwArea = 0.0;
+                    if (DiagnosticLog != null)
+                    {
+                        double scaleSq = ClipperConvert.Scale * ClipperConvert.Scale;
+                        for (int mi = 0; mi < merged.Count; mi++)
+                        {
+                            double a = Clipper.Area(merged[mi]) / scaleSq;
+                            if (a >= 0) { mergedCcwCount++; mergedCcwArea += a; }
+                            else { mergedCwCount++; mergedCwArea += -a; }
+                        }
+                    }
+
                     sw.Restart();
-                    sheet.ForbiddenByOrientation[candidate.OrientationIndex]
-                        = Clipper.Union(merged, FillRule.Positive);
+                    var unioned = Clipper.Union(merged, FillRule.Positive);
+                    sheet.ForbiddenByOrientation[candidate.OrientationIndex] = unioned;
                     sw.Stop();
                     totalUnion += sw.ElapsedMilliseconds;
+
+                    // Step 1 diagnostic: characterize Union OUTPUT by winding. Compare
+                    // to inputs above. If inputs were all CCW but output has CW, the
+                    // CW is born inside Clipper.Union (likely a self-touching artifact
+                    // of nearly-coincident edges). If inputs already had CW, the source
+                    // is upstream — the CW was carried in from a prior Update iteration.
+                    if (DiagnosticLog != null)
+                    {
+                        int outCcwCount = 0, outCwCount = 0;
+                        double outCcwArea = 0.0, outCwArea = 0.0;
+                        double scaleSq = ClipperConvert.Scale * ClipperConvert.Scale;
+                        for (int oi = 0; oi < unioned.Count; oi++)
+                        {
+                            double a = Clipper.Area(unioned[oi]) / scaleSq;
+                            if (a >= 0) { outCcwCount++; outCcwArea += a; }
+                            else { outCwCount++; outCwArea += -a; }
+                        }
+
+                        // Filter: log only when CW is present anywhere — input or
+                        // output. Skips the (large majority) of clean Unions to keep
+                        // the log readable.
+                        if (mergedCwCount > 0 || outCwCount > 0)
+                        {
+                            DiagnosticLog.Invoke(
+                                $"  Union after-place src{newlyPlaced.Orientation.SourcePartIndex} " +
+                                $"for cand-o{candidate.OrientationIndex}: " +
+                                $"in {merged.Count}p ({mergedCcwCount}CCW area={mergedCcwArea:G6} | " +
+                                $"{mergedCwCount}CW area={mergedCwArea:G6}) -> " +
+                                $"out {unioned.Count}p ({outCcwCount}CCW area={outCcwArea:G6} | " +
+                                $"{outCwCount}CW area={outCwArea:G6})");
+                        }
+                    }
 
                     orientationsProcessed++;
                 }
