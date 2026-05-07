@@ -1,0 +1,27 @@
+# Visual Studio
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# NuGet
+packages/
+*.nuget.props
+*.nuget.targets
+
+# JetBrains Rider
+.idea/
+
+# Misc
+*.log
+Thumbs.db
+.DS_Store
