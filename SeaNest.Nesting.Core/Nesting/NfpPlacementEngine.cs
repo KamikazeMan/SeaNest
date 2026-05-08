@@ -158,11 +158,15 @@ namespace SeaNest.Nesting.Core.Nesting
             int orientationsFit = 0;
             var sw = new System.Diagnostics.Stopwatch();
 
-            // Per-attempt time budget. Checked once per orientation. Soft fallback
-            // when a valid best-so-far placement exists: log and break out, the
-            // caller commits the best. Hard fail only when the budget exceeds
-            // before any orientation succeeded — there's nothing to fall back to
-            // and the input is plausibly malformed.
+            // Per-attempt time budget. Checked once per orientation. Both branches
+            // soft-exit by breaking out of the orientation loop:
+            //   - best != null: caller commits the best-so-far placement.
+            //   - best == null: caller sees `return false` (line ~247) and falls
+            //     through its existing same-sheet-failure path — try next existing
+            //     sheet, then a fresh sheet. The budget firing means "ran out of
+            //     time on this sheet," not "no placement exists anywhere."
+            // The BL coordinate sanity bound (line ~257) is the only remaining
+            // throw in this method and guards a true error condition.
             var attemptStopwatch = System.Diagnostics.Stopwatch.StartNew();
             var timeBudget = System.TimeSpan.FromSeconds(TryPlaceOnSheetTimeBudgetSeconds);
 
@@ -178,15 +182,17 @@ namespace SeaNest.Nesting.Core.Nesting
                             $"— using best-so-far " +
                             $"({orientationsTried}/{orientations.Count} orientations checked, " +
                             $"{orientationsFit} fit).");
-                        break;
                     }
-
-                    throw new System.InvalidOperationException(
-                        $"Part {partIndex} timed out in TryPlaceOnSheet after " +
-                        $"{attemptStopwatch.Elapsed.TotalSeconds:F1}s on sheet {sheetIdx} " +
-                        $"({orientationsTried}/{orientations.Count} orientations attempted, " +
-                        $"{orientationsFit} fit, best=no). " +
-                        $"Possibly malformed input geometry — Clipper2 stuck on degenerate Minkowski input.");
+                    else
+                    {
+                        DiagnosticLog?.Invoke(
+                            $"  Part {partIndex} budget exceeded after " +
+                            $"{attemptStopwatch.Elapsed.TotalSeconds:F1}s on sheet {sheetIdx} " +
+                            $"— no placement found in time, falling through to next sheet " +
+                            $"({orientationsTried}/{orientations.Count} orientations checked, " +
+                            $"{orientationsFit} IFP-feasible).");
+                    }
+                    break;
                 }
 
                 orientationsTried++;
