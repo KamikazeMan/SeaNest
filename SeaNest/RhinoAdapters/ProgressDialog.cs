@@ -1,7 +1,6 @@
 ﻿using System;
 using Eto.Drawing;
 using Eto.Forms;
-using Rhino.UI;
 
 namespace SeaNest.RhinoAdapters
 {
@@ -26,9 +25,11 @@ namespace SeaNest.RhinoAdapters
             // Owner-window relationship: stays above Rhino without being system-
             // global topmost. Previous implementation set Topmost = true which
             // surfaced over every app the user switched to (browsers, IDEs, etc).
-            // Defensive null check covers early-init or unit-test scenarios where
-            // RhinoEtoApp.MainWindow may not yet be available.
-            var rhinoMain = RhinoEtoApp.MainWindow;
+            // Fully qualify Rhino.UI.RhinoEtoApp to avoid a Fonts collision
+            // between Rhino.UI.Fonts and Eto.Drawing.Fonts (used below for the
+            // status label) — a namespace import would shadow Eto's Fonts.
+            // Defensive null check covers early-init or unit-test scenarios.
+            var rhinoMain = Rhino.UI.RhinoEtoApp.MainWindow;
             if (rhinoMain != null) Owner = rhinoMain;
 
             Resizable = false;

@@ -151,7 +151,6 @@ namespace SeaNest.Nesting.Core.Nesting
         {
             BestPlacement best = null;
 
-            long tNfpFetch = 0;
             long tForbidden = 0;
             long tFeasible = 0;
             long tBlSweep = 0;
