@@ -131,7 +131,7 @@ namespace SeaNest.Nesting.Core.Nesting
         /// produced multi-minute hangs on real boat-part inputs. Hardcoded for
         /// now; promote to NestRequest if user-configurable becomes useful.
         /// </summary>
-        private const int TryPlaceOnSheetTimeBudgetSeconds = 300;
+        private const int TryPlaceOnSheetTimeBudgetSeconds = 30;
 
         /// <summary>
         /// Sanity bound on the BL vertex picked from the feasible region. Catches
