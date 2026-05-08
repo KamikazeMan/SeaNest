@@ -142,6 +142,18 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         private const double BLVertexSanityFactor = 10.0;
 
+        /// <summary>
+        /// Linear tolerance for the Phase 6d defensive in-loop overlap check.
+        /// MUST match <see cref="Verification.FinalVerifier.VerifyTolerance"/> (1e-4)
+        /// so the engine's pre-commit check and the verifier's post-nest check share
+        /// a single verdict — anything the engine accepts here, the verifier accepts
+        /// there. <see cref="Overlap.OverlapChecker.Overlaps"/> squares this internally
+        /// against the intersection area, giving the 1e-8 area threshold the verifier
+        /// uses. Inlined rather than referenced via FinalVerifier to keep
+        /// SeaNest.Nesting.Core/Nesting free of a Verification namespace dependency.
+        /// </summary>
+        private const double OverlapTolerance = 1e-4;
+
         private bool TryPlaceOnSheet(
     int partIndex,
     List<OrientedPart> orientations,
@@ -150,6 +162,7 @@ namespace SeaNest.Nesting.Core.Nesting
     List<PlacementResult> placements)
         {
             BestPlacement best = null;
+            int overlapRejections = 0;
 
             long tForbidden = 0;
             long tFeasible = 0;
@@ -224,6 +237,30 @@ namespace SeaNest.Nesting.Core.Nesting
 
                 double tx = blVertex.Value.X;
                 double ty = blVertex.Value.Y;
+
+                // Phase 6d defensive in-loop overlap check. Until the underlying NFP
+                // bug is identified, verify that the BL search result doesn't actually
+                // overlap any prior placement on this sheet — and reject the
+                // orientation if it does. Same overlap primitive and threshold the
+                // FinalVerifier uses, so anything we accept here, the verifier accepts.
+                var candidatePolygon = orientation.CanonicalPolygon.Translate(tx, ty);
+                bool rejected = false;
+                foreach (var placed in sheet.Placed)
+                {
+                    var placedPolygon = placed.Orientation.CanonicalPolygon.Translate(placed.X, placed.Y);
+                    if (Overlap.OverlapChecker.Overlaps(candidatePolygon, placedPolygon, OverlapTolerance))
+                    {
+                        overlapRejections++;
+                        DiagnosticLog?.Invoke(
+                            $"  Part {partIndex} sheet {sheetIdx} orient={orientation.OrientationIndex}: " +
+                            $"BL search picked ({tx:F3},{ty:F3}) — REJECTED (#{overlapRejections} for this part), " +
+                            $"overlaps Part {placed.Orientation.SourcePartIndex} " +
+                            $"(orient={placed.Orientation.OrientationIndex}, pos=({placed.X:F3},{placed.Y:F3})).");
+                        rejected = true;
+                        break;
+                    }
+                }
+                if (rejected) continue;
 
                 if (best == null ||
                     ty < best.Y - 1e-9 ||
