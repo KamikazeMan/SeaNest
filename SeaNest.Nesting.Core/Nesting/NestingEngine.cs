@@ -85,9 +85,13 @@ namespace SeaNest.Nesting.Core.Nesting
             // Reset the concave-aware CW filter counters so the end-of-nest
             // summary reports only this run's classifications. Wire the per-
             // anomaly diagnostic sink so the (src-orient, cand-orient) pair
-            // of each anomaly surfaces during the run.
+            // of each anomaly surfaces during the run. ComputeLog surfaces
+            // expensive (slow or large-input) NFP cache-miss computations to
+            // attribute MinkowskiDiff cost — gated by elapsed/vertex
+            // thresholds in NoFitPolygon so it doesn't spam on cheap pairs.
             NoFitPolygon.ResetCounters();
             NoFitPolygon.AnomalyLog = DiagnosticCallback;
+            NoFitPolygon.ComputeLog = DiagnosticCallback;
 
             try
             {
@@ -96,6 +100,7 @@ namespace SeaNest.Nesting.Core.Nesting
             finally
             {
                 NoFitPolygon.AnomalyLog = null;
+                NoFitPolygon.ComputeLog = null;
             }
         }
 

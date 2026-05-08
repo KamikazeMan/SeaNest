@@ -90,6 +90,16 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         public static Action<string> AnomalyLog { get; set; }
 
+        /// <summary>
+        /// Optional per-Compute timing sink. When wired, each cache-miss
+        /// computation that's either slow (≥50ms) or large (either input has
+        /// ≥100 vertices) emits one line with the input vertex counts,
+        /// spacing, and elapsed time. Used to attribute MinkowskiDiff cost to
+        /// specific (orientation pair, input geometry) combinations so we can
+        /// decide whether to simplify upstream in BrepFlattener.
+        /// </summary>
+        public static Action<string> ComputeLog { get; set; }
+
         /// <summary>Reset all counters. Call once at the start of a nest run.</summary>
         public static void ResetCounters()
         {
@@ -112,6 +122,13 @@ namespace SeaNest.Nesting.Core.Nesting
         {
             if (a == null) throw new ArgumentNullException(nameof(a));
             if (b == null) throw new ArgumentNullException(nameof(b));
+
+            // Stopwatch only when the diagnostic sink is wired. Cheap branch
+            // outside the hot path; meaningful when wired. try/finally below
+            // ensures the log fires on every exit path (early-empty + success).
+            var computeSw = ComputeLog != null ? System.Diagnostics.Stopwatch.StartNew() : null;
+            try
+            {
 
             IReadOnlyList<Polygon> inflatedA = spacing > 0.0
                 ? PolygonInflate.Inflate(a, spacing)
@@ -221,6 +238,22 @@ namespace SeaNest.Nesting.Core.Nesting
                 simplified.Add(poly.Simplify(NfpSimplifyTolerance));
 
             return simplified;
+
+            } // end try
+            finally
+            {
+                if (computeSw != null)
+                {
+                    computeSw.Stop();
+                    long ms = computeSw.ElapsedMilliseconds;
+                    if (ms >= 50 || a.Count >= 100 || b.Count >= 100)
+                    {
+                        ComputeLog.Invoke(
+                            $"  NFP compute: src-orient={srcOrientationIndex} cand-orient={candOrientationIndex}, " +
+                            $"a.verts={a.Count}, b.verts={b.Count}, spacing={spacing:G6}, elapsed={ms}ms");
+                    }
+                }
+            }
         }
 
         /// <summary>
