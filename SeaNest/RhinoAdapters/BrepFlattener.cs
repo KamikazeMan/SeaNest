@@ -25,14 +25,74 @@ namespace SeaNest.RhinoAdapters
         private const double DiscretizationToleranceFactor = 0.1;
 
         /// <summary>
+        /// Pre-NFP simplification tolerance for the flattened polygon, in model
+        /// units (inches). 0.005" sits comfortably below typical CAM cut
+        /// precision (0.005-0.010" for plate cutting). Curve.ToPolyline emits
+        /// vertices every 0.5° of curvature regardless of CAM relevance,
+        /// producing 500-3000+ vertex polygons on real boat parts; DP at this
+        /// tolerance collapses arc densification back to feature-only vertices
+        /// without visible shape change.
+        /// </summary>
+        private const double SimplifyTolerance = 0.005;
+
+        /// <summary>
+        /// Vertex-count cap. Polygons exceeding this after the initial DP pass
+        /// trigger tolerance escalation. 500 is well above the natural vertex
+        /// count of any sensibly-meshed boat part (usually under 100 once
+        /// arcs collapse to chords); a polygon hitting this is over-tessellated
+        /// and would otherwise dominate MinkowskiDiff cost.
+        /// </summary>
+        private const int MaxVertices = 500;
+
+        /// <summary>Each escalation doubles the simplification tolerance.</summary>
+        private const double EscalationFactor = 2.0;
+
+        /// <summary>
+        /// Hard ceiling on tolerance escalation. With <see cref="SimplifyTolerance"/>
+        /// = 0.005 and <see cref="EscalationFactor"/> = 2.0, three escalations cap
+        /// at 0.04" — still below most CAM reject thresholds but well into
+        /// "warn the user, this part needs attention" territory.
+        /// </summary>
+        private const int MaxEscalations = 3;
+
+        /// <summary>
         /// Callback invoked when a part was flattened using Squish. Used by the command layer
         /// to inform the user that dimensions may be approximate for curved parts.
         /// </summary>
         public static Action<string> SquishWarning { get; set; }
 
+        /// <summary>
+        /// Callback invoked when a part's polygon was simplified at an escalated
+        /// tolerance because the initial pass left it above the vertex cap.
+        /// Surfaces over-tessellated input geometry to the user without aborting
+        /// the nest. Wired by the command layer to RhinoApp.WriteLine.
+        /// </summary>
+        public static Action<string> SimplifyWarning { get; set; }
+
         public static Polygon Flatten(Brep brep, RhinoDoc doc)
         {
-            return FlattenRaw(brep, doc);
+            var raw = FlattenRaw(brep, doc);
+            if (raw == null) return null;
+
+            // Pre-NFP simplification: collapse arc densification from
+            // Curve.ToPolyline / SquishMesh down to feature-only vertices.
+            // The Brep itself is not modified — this only affects the Polygon
+            // used downstream by the nesting engine.
+            int rawCount = raw.Count;
+            var simplified = raw.SimplifyToTarget(
+                SimplifyTolerance, MaxVertices, EscalationFactor, MaxEscalations,
+                out double finalTol);
+
+            if (finalTol > SimplifyTolerance + 1e-12)
+            {
+                SimplifyWarning?.Invoke(
+                    $"Part simplified from {rawCount} to {simplified.Count} vertices " +
+                    $"at tolerance {finalTol:G3}\" (escalated from {SimplifyTolerance:G3}\" " +
+                    $"because raw exceeded {MaxVertices}-vertex cap). Consider remeshing the source " +
+                    $"Brep at a coarser angle tolerance if this fires often.");
+            }
+
+            return simplified;
         }
 
         private static Polygon FlattenRaw(Brep brep, RhinoDoc doc)

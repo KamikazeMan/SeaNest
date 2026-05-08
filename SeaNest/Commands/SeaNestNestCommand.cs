@@ -128,6 +128,14 @@ namespace SeaNest.Commands
                 if (msg.Contains("Squish")) squishedCount++;
             };
 
+            // Wire the simplify warning so users see which parts had their pre-NFP
+            // simplification escalated past the default tolerance because the raw
+            // polygon exceeded the vertex cap.
+            BrepFlattener.SimplifyWarning = msg =>
+            {
+                if (msg != null) RhinoApp.WriteLine(msg);
+            };
+
             var polygons = new List<Polygon>();
             for (int i = 0; i < breps.Count; i++)
             {

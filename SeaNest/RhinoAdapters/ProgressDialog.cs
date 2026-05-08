@@ -1,6 +1,7 @@
 ﻿using System;
 using Eto.Drawing;
 using Eto.Forms;
+using Rhino.UI;
 
 namespace SeaNest.RhinoAdapters
 {
@@ -9,7 +10,9 @@ namespace SeaNest.RhinoAdapters
     ///
     /// Implemented as a non-modal <see cref="Form"/> (not a <see cref="Dialog"/>) so the
     /// command thread can drive both the engine and the UI updates without deadlocking.
-    /// Centered on the primary screen, Topmost so it floats above Rhino.
+    /// Owned by Rhino's main window so it floats above Rhino but NOT above unrelated
+    /// applications — switching to a browser or IDE while a nest is running puts those
+    /// in front, as expected.
     /// </summary>
     public sealed class ProgressDialog : Form
     {
@@ -19,7 +22,15 @@ namespace SeaNest.RhinoAdapters
         {
             WindowStyle = WindowStyle.None;
             ShowInTaskbar = false;
-            Topmost = true;
+
+            // Owner-window relationship: stays above Rhino without being system-
+            // global topmost. Previous implementation set Topmost = true which
+            // surfaced over every app the user switched to (browsers, IDEs, etc).
+            // Defensive null check covers early-init or unit-test scenarios where
+            // RhinoEtoApp.MainWindow may not yet be available.
+            var rhinoMain = RhinoEtoApp.MainWindow;
+            if (rhinoMain != null) Owner = rhinoMain;
+
             Resizable = false;
             Maximizable = false;
             Minimizable = false;

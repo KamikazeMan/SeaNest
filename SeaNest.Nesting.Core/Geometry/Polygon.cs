@@ -371,6 +371,56 @@ namespace SeaNest.Nesting.Core.Geometry
         }
 
         /// <summary>
+        /// Simplify to a target maximum vertex count using <see cref="SimplifyDouglasPeucker"/>
+        /// with tolerance escalation. Always runs at least one DP pass at
+        /// <paramref name="initialTolerance"/>; if the result still exceeds
+        /// <paramref name="maxVertices"/>, multiplies tolerance by
+        /// <paramref name="escalationFactor"/> and retries — re-running on the ORIGINAL
+        /// polygon each time, not on the previously-simplified result, because DP is
+        /// deterministic given (input, tolerance) and re-simplifying already-simplified
+        /// geometry produces a different (worse) outcome than simplifying the original
+        /// at the higher tolerance directly.
+        ///
+        /// Stops at the first iteration where Count ≤ maxVertices, OR after
+        /// <paramref name="maxEscalations"/> escalation passes regardless of count
+        /// (returning the over-cap result rather than failing — caller should log).
+        ///
+        /// <paramref name="finalTolerance"/> reports the tolerance of the returned
+        /// result; comparing it to <paramref name="initialTolerance"/> tells the
+        /// caller whether escalation fired.
+        /// </summary>
+        public Polygon SimplifyToTarget(
+            double initialTolerance,
+            int maxVertices,
+            double escalationFactor,
+            int maxEscalations,
+            out double finalTolerance)
+        {
+            if (initialTolerance <= 0)
+                throw new ArgumentException("initialTolerance must be positive.", nameof(initialTolerance));
+            if (maxVertices < 3)
+                throw new ArgumentException("maxVertices must be at least 3.", nameof(maxVertices));
+            if (escalationFactor <= 1.0)
+                throw new ArgumentException("escalationFactor must be greater than 1.0.", nameof(escalationFactor));
+            if (maxEscalations < 0)
+                throw new ArgumentException("maxEscalations must be non-negative.", nameof(maxEscalations));
+
+            double tol = initialTolerance;
+            Polygon result = SimplifyDouglasPeucker(tol);
+
+            int escalations = 0;
+            while (result.Count > maxVertices && escalations < maxEscalations)
+            {
+                tol *= escalationFactor;
+                result = SimplifyDouglasPeucker(tol); // run on original (this), not on result
+                escalations++;
+            }
+
+            finalTolerance = tol;
+            return result;
+        }
+
+        /// <summary>
         /// Index of the vertex farthest from the polygon's centroid. Used to anchor
         /// DP recursion at a stable, geometry-invariant starting point.
         /// </summary>
