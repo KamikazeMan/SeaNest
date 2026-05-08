@@ -129,7 +129,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             try
             {
-                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache);
+                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache, nfpPolygons);
             }
             finally
             {
@@ -143,7 +143,8 @@ namespace SeaNest.Nesting.Core.Nesting
             Stopwatch stopwatch,
             bool useAnnealing,
             NfpPlacementEngine engine,
-            NfpCache cache)
+            NfpCache cache,
+            IReadOnlyList<Polygon> nfpPolygons)
         {
             // Step 4: Place parts.
             NfpPlacementEngine.NestResult result;
