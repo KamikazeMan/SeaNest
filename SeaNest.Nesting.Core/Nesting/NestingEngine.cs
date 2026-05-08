@@ -23,6 +23,35 @@ namespace SeaNest.Nesting.Core.Nesting
         /// <summary>Fixed step size for slide-tightening, in model units. BLF only.</summary>
         private const double SlideStep = 0.01;
 
+        /// <summary>
+        /// NFP-specific vertex cap. Tighter than BrepFlattener's 500 because Clipper2
+        /// MinkowskiDiff is super-linear in vertex count — pairs of 400v parts produced
+        /// 4–13s computes during Phase 6 testing. 200v reduces this to under 500ms in
+        /// typical cases (~5–10× speedup per NFP). Applied at <see cref="NestNFP"/>
+        /// entry only; the BLF path consumes <c>request.Polygons</c> directly with the
+        /// 500-cap variant from <c>BrepFlattener</c>.
+        /// </summary>
+        private const int NfpMaxVertices = 200;
+
+        /// <summary>
+        /// Initial tolerance for the NFP-specific second-pass simplification.
+        /// Matches BrepFlattener's flatten-time tolerance — for inputs already at or
+        /// below the 200-cap, this pass is a near-no-op. Only escalates when the input
+        /// is above the 200-cap.
+        /// </summary>
+        private const double NfpInitialTolerance = 0.005;
+
+        /// <summary>Each escalation doubles the simplification tolerance.</summary>
+        private const double NfpEscalationFactor = 2.0;
+
+        /// <summary>
+        /// Hard ceiling on tolerance escalation. With <see cref="NfpInitialTolerance"/>
+        /// = 0.005 and <see cref="NfpEscalationFactor"/> = 2.0, three escalations cap
+        /// at 0.04". Beyond this we surface a warning and proceed with the over-cap
+        /// polygon — better slow than wrong-shaped.
+        /// </summary>
+        private const int NfpMaxEscalations = 3;
+
         /// <summary>Report progress (0..1) and status text. May be null.</summary>
         public Action<double, string> ProgressCallback { get; set; }
 
@@ -65,9 +94,14 @@ namespace SeaNest.Nesting.Core.Nesting
         {
             ProgressCallback?.Invoke(0.05, "Building part orientations...");
 
+            // NFP-specific simplification: tighter vertex cap than BrepFlattener's
+            // flatten-time 500. See NfpMaxVertices for the Phase 6b rationale.
+            // BLF path is unaffected — it consumes request.Polygons directly.
+            var nfpPolygons = SimplifyForNfp(request.Polygons);
+
             // Step 1: Build all oriented variants. Mirror and rotation baked into each.
             OrientedPart.BuildAll(
-                request.Polygons,
+                nfpPolygons,
                 request.RotationStepDegrees,
                 request.AllowMirror,
                 out var allOrientations,
@@ -116,7 +150,9 @@ namespace SeaNest.Nesting.Core.Nesting
 
             // Largest-bbox-diagonal first — same warm start BLF uses. Both Greedy
             // and Annealed start from this order; Annealed then perturbs around it.
-            var initialOrder = BuildLargestFirstOrder(request.Polygons);
+            // Same nfpPolygons used everywhere on the NFP path — bbox is preserved
+            // by DP simplification, so warm-start ordering is unaffected.
+            var initialOrder = BuildLargestFirstOrder(nfpPolygons);
 
             if (useAnnealing)
             {
@@ -197,6 +233,48 @@ namespace SeaNest.Nesting.Core.Nesting
             });
 
             return indexed.Select(t => t.idx).ToList();
+        }
+
+        /// <summary>
+        /// Apply the NFP-specific simplification cap to every polygon in the input
+        /// list. Returns a new list of (possibly) simplified polygons in the same
+        /// order; original list is not mutated. Per-part warnings are surfaced via
+        /// <see cref="DiagnosticCallback"/> when escalation fires or when even the
+        /// max-escalation pass fails to bring a polygon under the NFP cap.
+        /// </summary>
+        private List<Polygon> SimplifyForNfp(IReadOnlyList<Polygon> polygons)
+        {
+            var result = new List<Polygon>(polygons.Count);
+            for (int i = 0; i < polygons.Count; i++)
+            {
+                var raw = polygons[i];
+                var simplified = raw.SimplifyToTarget(
+                    NfpInitialTolerance, NfpMaxVertices,
+                    NfpEscalationFactor, NfpMaxEscalations,
+                    out double finalTol);
+
+                if (simplified.Count > NfpMaxVertices)
+                {
+                    // Even at max-escalation tolerance the cap couldn't be met. This
+                    // polygon will dominate MinkowskiDiff cost; surface so the user
+                    // can investigate the source Brep's discretization.
+                    DiagnosticCallback?.Invoke(
+                        $"NFP simplification: part {i} stayed at {simplified.Count} verts " +
+                        $"at tolerance {finalTol:G3}\" (NFP cap is {NfpMaxVertices}). " +
+                        $"Already past the broader BrepFlattener 500-cap — consider remeshing the source " +
+                        $"Brep at a coarser angle tolerance.");
+                }
+                else if (finalTol > NfpInitialTolerance + 1e-12)
+                {
+                    DiagnosticCallback?.Invoke(
+                        $"NFP simplification: part {i} reduced from {raw.Count} to {simplified.Count} verts " +
+                        $"at tolerance {finalTol:G3}\" (escalated from {NfpInitialTolerance:G3}\" " +
+                        $"because raw exceeded {NfpMaxVertices}-vertex NFP cap).");
+                }
+
+                result.Add(simplified);
+            }
+            return result;
         }
 
         // ==================================================================
