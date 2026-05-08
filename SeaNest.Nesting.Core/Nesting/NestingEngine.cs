@@ -31,7 +31,7 @@ namespace SeaNest.Nesting.Core.Nesting
         /// entry only; the BLF path consumes <c>request.Polygons</c> directly with the
         /// 500-cap variant from <c>BrepFlattener</c>.
         /// </summary>
-        private const int NfpMaxVertices = 200;
+        private const int NfpMaxVertices = 500;
 
         /// <summary>
         /// Initial tolerance for the NFP-specific second-pass simplification.
