@@ -243,12 +243,12 @@ namespace SeaNest.Nesting.Core.Nesting
                 // overlap any prior placement on this sheet — and reject the
                 // orientation if it does. Same overlap primitive and threshold the
                 // FinalVerifier uses, so anything we accept here, the verifier accepts.
-                var candidatePolygon = orientation.CanonicalPolygon.Translate(tx, ty);
+                var candidatePoly = orientation.CanonicalPolygon.Translate(tx, ty);
                 bool rejected = false;
                 foreach (var placed in sheet.Placed)
                 {
-                    var placedPolygon = placed.Orientation.CanonicalPolygon.Translate(placed.X, placed.Y);
-                    if (Overlap.OverlapChecker.Overlaps(candidatePolygon, placedPolygon, OverlapTolerance))
+                    var priorPoly = placed.Orientation.CanonicalPolygon.Translate(placed.X, placed.Y);
+                    if (Overlap.OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
                     {
                         overlapRejections++;
                         DiagnosticLog?.Invoke(
