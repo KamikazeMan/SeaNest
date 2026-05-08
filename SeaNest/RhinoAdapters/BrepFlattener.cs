@@ -69,9 +69,9 @@ namespace SeaNest.RhinoAdapters
         /// </summary>
         public static Action<string> SimplifyWarning { get; set; }
 
-        public static Polygon Flatten(Brep brep, RhinoDoc doc)
+        public static BrepFlattenResult Flatten(Brep brep, RhinoDoc doc)
         {
-            var raw = FlattenRaw(brep, doc);
+            var raw = FlattenRaw(brep, doc, out var innerLoops);
             if (raw == null) return null;
 
             // Pre-NFP simplification: collapse arc densification from
@@ -92,11 +92,15 @@ namespace SeaNest.RhinoAdapters
                     $"Brep at a coarser angle tolerance if this fires often.");
             }
 
-            return simplified;
+            // Inner loops are NOT simplified — fidelity matters for cut output, and
+            // they don't enter NFP so MinkowskiDiff cost is not a concern.
+            return new BrepFlattenResult(simplified, innerLoops);
         }
 
-        private static Polygon FlattenRaw(Brep brep, RhinoDoc doc)
+        private static Polygon FlattenRaw(Brep brep, RhinoDoc doc, out List<Curve> innerLoops)
         {
+            innerLoops = new List<Curve>();
+
             if (brep == null) throw new ArgumentNullException(nameof(brep));
             if (doc == null) throw new ArgumentNullException(nameof(doc));
 
@@ -108,8 +112,9 @@ namespace SeaNest.RhinoAdapters
             var plateFace = FindLargestPlanarFace(brep, modelTol);
             if (plateFace != null)
             {
-                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad);
+                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, innerLoops);
                 if (poly != null) return poly;
+                innerLoops.Clear();
             }
 
             // Step 2: Fully flat open Brep.
@@ -118,8 +123,9 @@ namespace SeaNest.RhinoAdapters
                 Plane plane;
                 if (TryGetBrepPlane(brep, modelTol, out plane))
                 {
-                    var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad);
+                    var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, innerLoops);
                     if (poly != null) return poly;
+                    innerLoops.Clear();
                 }
             }
 
@@ -128,21 +134,23 @@ namespace SeaNest.RhinoAdapters
             var unrolled = Unroll(brep, unrollTol, angleTolRad);
             if (unrolled != null)
             {
-                var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad);
+                var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, innerLoops);
                 if (poly != null) return poly;
+                innerLoops.Clear();
             }
 
             // Step 4: Fallback — squish the largest face regardless of planarity.
             var squishFace = FindLargestFace(brep);
             if (squishFace != null)
             {
-                var poly = SquishFaceToPolygon(squishFace, discretizeTol, angleTolRad);
+                var poly = SquishFaceToPolygon(squishFace, discretizeTol, angleTolRad, innerLoops);
                 if (poly != null)
                 {
                     SquishWarning?.Invoke(
                         "Squish flattening used — dimensions may be approximate for curved parts.");
                     return poly;
                 }
+                innerLoops.Clear();
             }
 
             return null;
@@ -228,7 +236,7 @@ namespace SeaNest.RhinoAdapters
             return winnerFace;
         }
 
-        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad)
+        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, List<Curve> innerLoopsOut)
         {
             Plane facePlane;
             if (!face.TryGetPlane(out facePlane)) return null;
@@ -237,17 +245,31 @@ namespace SeaNest.RhinoAdapters
             if (faceBrep == null) return null;
 
             Curve outerLoop = null;
+            var rawInnerLoops = new List<Curve>();
             foreach (var loop in faceBrep.Loops)
             {
                 if (loop.LoopType == BrepLoopType.Outer)
                 {
-                    outerLoop = loop.To3dCurve();
-                    break;
+                    if (outerLoop == null) outerLoop = loop.To3dCurve();
+                }
+                else if (loop.LoopType == BrepLoopType.Inner)
+                {
+                    var c = loop.To3dCurve();
+                    if (c != null) rawInnerLoops.Add(c);
                 }
             }
             if (outerLoop == null) return null;
 
-            return CurveToPolygonOnPlane(outerLoop, facePlane, discretizeTol, angleTolRad);
+            var outerPoly = CurveToPolygonOnPlane(outerLoop, facePlane, discretizeTol, angleTolRad);
+            if (outerPoly == null) return null;
+
+            foreach (var c in rawInnerLoops)
+            {
+                var pc = CurveToPolylineCurveOnPlane(c, facePlane, discretizeTol, angleTolRad);
+                if (pc != null) innerLoopsOut.Add(pc);
+            }
+
+            return outerPoly;
         }
 
         // ------------------------------------------------------------------
@@ -270,7 +292,8 @@ namespace SeaNest.RhinoAdapters
         }
 
         private static Polygon FlatBrepToPolygonOnPlane(
-            Brep flatBrep, Plane plane, double joinTol, double discretizeTol, double angleTolRad)
+            Brep flatBrep, Plane plane, double joinTol, double discretizeTol, double angleTolRad,
+            List<Curve> innerLoopsOut)
         {
             var nakedEdges = new List<Curve>();
             foreach (var edge in flatBrep.Edges)
@@ -288,16 +311,28 @@ namespace SeaNest.RhinoAdapters
 
             Curve outer = null;
             double outerArea = -1;
+            var closedLoops = new List<Curve>();
             foreach (var loop in joined)
             {
                 if (!loop.IsClosed) continue;
+                closedLoops.Add(loop);
                 var amp = AreaMassProperties.Compute(loop);
                 double area = amp?.Area ?? 0;
                 if (area > outerArea) { outer = loop; outerArea = area; }
             }
             if (outer == null) return null;
 
-            return CurveToPolygonOnPlane(outer, plane, discretizeTol, angleTolRad);
+            var outerPoly = CurveToPolygonOnPlane(outer, plane, discretizeTol, angleTolRad);
+            if (outerPoly == null) return null;
+
+            foreach (var loop in closedLoops)
+            {
+                if (ReferenceEquals(loop, outer)) continue;
+                var pc = CurveToPolylineCurveOnPlane(loop, plane, discretizeTol, angleTolRad);
+                if (pc != null) innerLoopsOut.Add(pc);
+            }
+
+            return outerPoly;
         }
 
         // ------------------------------------------------------------------
@@ -334,7 +369,7 @@ namespace SeaNest.RhinoAdapters
         /// the underlying surface of a Patch or trimmed NURBS extends beyond the visible face,
         /// and SquishSurface on it produces a wrong-shaped output.
         /// </summary>
-        private static Polygon SquishFaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad)
+        private static Polygon SquishFaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, List<Curve> innerLoopsOut)
         {
             var faceBrep = face.DuplicateFace(false);
             if (faceBrep == null) return null;
@@ -389,13 +424,76 @@ namespace SeaNest.RhinoAdapters
             }
             if (points.Count < 3) return null;
 
-            try { return new Polygon(points); }
+            Polygon outerPoly;
+            try { outerPoly = new Polygon(points); }
             catch (ArgumentException) { return null; }
+
+            // Squished mesh is already 2D — emit the non-longest naked edges as
+            // closed PolylineCurves at z=0. Squish-path dimensional caveat is
+            // already surfaced via SquishWarning; same caveat covers these holes.
+            for (int i = 0; i < nakedEdges.Length; i++)
+            {
+                var edge = nakedEdges[i];
+                if (ReferenceEquals(edge, outer)) continue;
+                if (edge.Count < 3) continue;
+
+                var pl = new Polyline(edge.Count + 1);
+                for (int j = 0; j < edge.Count; j++)
+                    pl.Add(edge[j].X, edge[j].Y, 0);
+                if (!pl.IsClosed) pl.Add(pl[0]);
+                if (pl.Count < 4) continue;
+
+                innerLoopsOut.Add(new PolylineCurve(pl));
+            }
+
+            return outerPoly;
         }
 
         // ------------------------------------------------------------------
         // Shared: curve -> polygon via projection onto a given plane
         // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Sister of <see cref="CurveToPolygonOnPlane"/> that emits a closed
+        /// <see cref="PolylineCurve"/> at world-XY (Z=0) for inner-loop cut output.
+        /// Used by Phase 7b inner-loop preservation: the outer ring becomes a
+        /// <see cref="Polygon"/> for the engine, but inner loops bypass the engine
+        /// and travel as Rhino curves to <see cref="PolygonToCurve.ToCurveFromOriginal"/>
+        /// at draw time.
+        /// </summary>
+        private static PolylineCurve CurveToPolylineCurveOnPlane(Curve curve, Plane plane, double discretizeTol, double angleTolRad)
+        {
+            Polyline polyline;
+            if (!curve.TryGetPolyline(out polyline))
+            {
+                var polylineCurve = curve.ToPolyline(
+                    mainSegmentCount: 0,
+                    subSegmentCount: 0,
+                    maxAngleRadians: angleTolRad,
+                    maxChordLengthRatio: 0,
+                    maxAspectRatio: 0,
+                    tolerance: discretizeTol,
+                    minEdgeLength: 0,
+                    maxEdgeLength: 0,
+                    keepStartPoint: true);
+                if (polylineCurve == null || !polylineCurve.TryGetPolyline(out polyline))
+                    return null;
+            }
+            if (polyline == null || polyline.Count < 3) return null;
+
+            var projected = new Polyline(polyline.Count + 1);
+            for (int i = 0; i < polyline.Count; i++)
+            {
+                double u, v;
+                if (!plane.ClosestParameter(polyline[i], out u, out v)) return null;
+                projected.Add(u, v, 0);
+            }
+            if (projected.Count < 3) return null;
+            if (!projected.IsClosed) projected.Add(projected[0]);
+            if (projected.Count < 4) return null;
+
+            return new PolylineCurve(projected);
+        }
 
         private static Polygon CurveToPolygonOnPlane(Curve curve, Plane plane, double discretizeTol, double angleTolRad)
         {

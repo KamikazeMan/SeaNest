@@ -137,16 +137,20 @@ namespace SeaNest.Commands
             };
 
             var polygons = new List<Polygon>();
+            // Phase 7b: parallel per-part inner-loop table indexed by polygons[i].
+            // Bypasses the nesting engine entirely; consumed only at draw time.
+            var innerLoopsPerPart = new List<IReadOnlyList<Curve>>();
             for (int i = 0; i < breps.Count; i++)
             {
-                var poly = BrepFlattener.Flatten(breps[i], doc);
-                if (poly == null)
+                var flat = BrepFlattener.Flatten(breps[i], doc);
+                if (flat == null)
                 {
                     RhinoApp.WriteLine($"Part {i + 1}: could not flatten — skipped.");
                 }
                 else
                 {
-                    polygons.Add(poly);
+                    polygons.Add(flat.Outer);
+                    innerLoopsPerPart.Add(flat.InnerLoops);
                 }
             }
 
@@ -225,7 +229,7 @@ namespace SeaNest.Commands
                 return Rhino.Commands.Result.Nothing;
             }
 
-            DrawNestingResult(doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric);
+            DrawNestingResult(doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric, innerLoopsPerPart);
 
             int mirrored = response.Placements.Count(p => p.IsMirrored);
             string mirrorNote = mirrored > 0 ? $", {mirrored} mirrored" : "";
@@ -251,7 +255,8 @@ namespace SeaNest.Commands
             RhinoDoc doc,
             NestResponse response,
             double sheetW, double sheetH, double sheetT,
-            double margin, double inToModel, bool isMetric)
+            double margin, double inToModel, bool isMetric,
+            IReadOnlyList<IReadOnlyList<Curve>> innerLoopsPerPart = null)
         {
             int layerNestedIdx = EnsureLayer(doc, LayerNested, System.Drawing.Color.Black);
             int layerSheetsIdx = EnsureLayer(doc, LayerSheets, System.Drawing.Color.Black);
@@ -310,6 +315,23 @@ namespace SeaNest.Commands
                 var partAttrs = new ObjectAttributes { LayerIndex = layerNestedIdx };
                 var partId = doc.Objects.AddCurve(partCurve, partAttrs);
                 if (partId != Guid.Empty) createdObjectIds.Add(partId);
+
+                // Phase 7b: ride-along inner-loop cut curves (pipe holes, hatch
+                // cutouts). Engine never sees these; we apply the same
+                // mirror→rotate→translate that the placed outer received.
+                if (innerLoopsPerPart != null && pp.OriginalIndex < innerLoopsPerPart.Count)
+                {
+                    var loops = innerLoopsPerPart[pp.OriginalIndex];
+                    if (loops != null)
+                    {
+                        foreach (var loop in loops)
+                        {
+                            var transformed = PolygonToCurve.ToCurveFromOriginal(loop, pp, yOffset);
+                            var loopId = doc.Objects.AddCurve(transformed, partAttrs);
+                            if (loopId != Guid.Empty) createdObjectIds.Add(loopId);
+                        }
+                    }
+                }
             }
 
             var rotationTransform = Transform.Rotation(Math.PI / 2.0, Vector3d.ZAxis, Point3d.Origin);

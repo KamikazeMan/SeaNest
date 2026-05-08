@@ -30,12 +30,13 @@ namespace SeaNest.Commands
             }
             if (brep == null) return Result.Failure;
 
-            var poly = BrepFlattener.Flatten(brep, doc);
-            if (poly == null)
+            var flat = BrepFlattener.Flatten(brep, doc);
+            if (flat == null)
             {
                 RhinoApp.WriteLine("Could not flatten.");
                 return Result.Failure;
             }
+            var poly = flat.Outer;
 
             // Draw the polygon as a closed polyline with each vertex as a point object.
             var polyline = new Polyline(poly.Count + 1);
