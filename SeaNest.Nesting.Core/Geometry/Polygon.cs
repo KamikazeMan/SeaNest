@@ -21,6 +21,8 @@ namespace SeaNest.Nesting.Core.Geometry
         private double? _area;
         private Point2D? _centroid;
         private bool? _isConvex;
+        private double? _principalAxisAngle;
+        private double? _aspectRatio;
 
         /// <summary>
         /// Create a polygon from a sequence of points.
@@ -116,6 +118,84 @@ namespace SeaNest.Nesting.Core.Geometry
                 if (!_centroid.HasValue)
                     _centroid = ComputeCentroid();
                 return _centroid.Value;
+            }
+        }
+
+        /// <summary>
+        /// Direction of the polygon's principal axis (axis of largest variance),
+        /// in radians from world +X. Computed via PCA on the vertex set using the
+        /// centroid as origin: <c>θ = atan2(2·Sxy, Sxx − Syy) / 2</c>, with Sxx,
+        /// Syy, Sxy the standard 2D covariance components. Range
+        /// <c>[−π/2, π/2]</c>. Computed lazily and cached.
+        ///
+        /// <para>
+        /// Used by callers that need a "visual long axis" — e.g. label rotation
+        /// for elongated parts where the part's long direction is what humans
+        /// expect text to read along. PCA matches eye intuition for typical
+        /// plate parts (long thin strips, fantail panels, etc.); it is not
+        /// minimum-area-OBB and may differ from a rotating-calipers result for
+        /// shapes with strong corner constraints (L-shapes etc.).
+        /// </para>
+        ///
+        /// <para>
+        /// <b>Reading-direction ambiguity for near-vertical axes.</b> The
+        /// principal axis is a direction (line), so θ and θ+π are geometrically
+        /// equivalent. The atan2 formula returns one of the two equivalents,
+        /// determined by sign of Sxy. For a vertical strip this means the
+        /// returned angle is either ≈ +π/2 or ≈ −π/2 — text rendered at that
+        /// angle reads either bottom-to-top or top-to-bottom. The result is
+        /// consistent per polygon (same shape always gets the same convention),
+        /// but is not normalized to a single global convention. Callers that
+        /// need a canonical reading direction should normalize at the call site.
+        /// </para>
+        ///
+        /// <para>
+        /// <b>Stability for near-square parts.</b> When Sxx ≈ Syy and Sxy ≈ 0
+        /// (rotationally symmetric shapes, near-circular parts), the principal
+        /// axis is geometrically indeterminate and small numerical perturbations
+        /// can flip it by 90°. Callers should gate use of this property on a
+        /// minimum <see cref="AspectRatio"/> threshold (e.g. > 2 or > 5) to
+        /// avoid acting on noise.
+        /// </para>
+        /// </summary>
+        public double PrincipalAxisAngle
+        {
+            get
+            {
+                if (!_principalAxisAngle.HasValue)
+                    _principalAxisAngle = ComputePrincipalAxisAngle();
+                return _principalAxisAngle.Value;
+            }
+        }
+
+        /// <summary>
+        /// Aspect ratio of the polygon as measured against its
+        /// <see cref="PrincipalAxisAngle"/>: the extent along the principal axis
+        /// divided by the extent along the perpendicular axis. Always ≥ 1.0 by
+        /// construction (principal axis is the direction of largest spread).
+        /// Computed lazily and cached.
+        ///
+        /// <para>
+        /// Single O(n) pass projecting each vertex onto the principal and
+        /// perpendicular unit vectors and tracking min/max on each. Uses the
+        /// cached <see cref="PrincipalAxisAngle"/> (which uses cached
+        /// <see cref="Centroid"/>), so first access of either property pays the
+        /// PCA cost once and subsequent accesses are O(1).
+        /// </para>
+        ///
+        /// <para>
+        /// Used to decide whether <see cref="PrincipalAxisAngle"/> is meaningful
+        /// enough to act on. Near 1.0 = essentially-square; > 5 = visually-
+        /// elongated strip.
+        /// </para>
+        /// </summary>
+        public double AspectRatio
+        {
+            get
+            {
+                if (!_aspectRatio.HasValue)
+                    _aspectRatio = ComputeAspectRatio();
+                return _aspectRatio.Value;
             }
         }
 
@@ -805,6 +885,69 @@ namespace SeaNest.Nesting.Core.Geometry
 
             double factor = 1.0 / (6.0 * signedArea);
             return new Point2D(cx * factor, cy * factor);
+        }
+
+        private double ComputePrincipalAxisAngle()
+        {
+            // 2D PCA on the vertex set, weighted uniformly. Returns the angle of
+            // the eigenvector corresponding to the larger eigenvalue of the
+            // covariance matrix [[Sxx, Sxy], [Sxy, Syy]].
+            //
+            // The closed-form for the principal-axis angle in 2D is
+            //     tan(2θ) = 2·Sxy / (Sxx − Syy)
+            // so θ = atan2(2·Sxy, Sxx − Syy) / 2.
+            // atan2 returns the angle in (−π, π]; dividing by 2 puts θ in
+            // (−π/2, π/2]. By the construction of the atan2 arguments this is
+            // always the larger-eigenvalue axis (the longer direction).
+            //
+            // Degenerate (Sxx == Syy and Sxy == 0): atan2(0, 0) returns 0 and
+            // we return 0. This case only arises for rotationally-symmetric
+            // vertex sets; callers should gate use on AspectRatio anyway.
+            var c = Centroid;
+            double sxx = 0.0, syy = 0.0, sxy = 0.0;
+            for (int i = 0; i < _points.Length; i++)
+            {
+                double dx = _points[i].X - c.X;
+                double dy = _points[i].Y - c.Y;
+                sxx += dx * dx;
+                syy += dy * dy;
+                sxy += dx * dy;
+            }
+            return Math.Atan2(2.0 * sxy, sxx - syy) * 0.5;
+        }
+
+        private double ComputeAspectRatio()
+        {
+            // Project every vertex onto the principal axis (cosθ, sinθ) and the
+            // perpendicular axis (−sinθ, cosθ); take the (max−min) extent on
+            // each. The principal extent is, by construction of PCA, >= the
+            // perpendicular extent, so the ratio is always >= 1.
+            //
+            // For a degenerate (zero-extent) perpendicular — collinear vertex
+            // set, which Polygon's constructor already rejects in practice —
+            // return double.PositiveInfinity so any reasonable threshold
+            // check still rejects the geometry rather than producing NaN.
+            double theta = PrincipalAxisAngle;
+            double cos = Math.Cos(theta);
+            double sin = Math.Sin(theta);
+
+            double minU = double.PositiveInfinity, maxU = double.NegativeInfinity;
+            double minV = double.PositiveInfinity, maxV = double.NegativeInfinity;
+            for (int i = 0; i < _points.Length; i++)
+            {
+                double x = _points[i].X;
+                double y = _points[i].Y;
+                double u = x * cos + y * sin;          // projection onto principal
+                double v = -x * sin + y * cos;         // projection onto perpendicular
+                if (u < minU) minU = u;
+                if (u > maxU) maxU = u;
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+            double length = maxU - minU;
+            double width = maxV - minV;
+            if (width <= 0.0) return double.PositiveInfinity;
+            return length / width;
         }
 
         private bool ComputeIsConvex()

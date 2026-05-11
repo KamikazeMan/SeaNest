@@ -45,6 +45,14 @@ namespace SeaNest.Commands
         // imperceptible. Tuned for plate parts in the 10"-300" range.
         private const double PartLabelPolelabelPrecisionIn = 0.5;
 
+        // Phase 11 — aspect-ratio threshold above which the label rotation
+        // overrides pp.RotationDeg with the placed polygon's PCA principal
+        // axis. 5:1 cleanly separates "visually elongated strip" (where the
+        // long axis is the natural reading direction) from "roughly square
+        // or chunky" parts (where PCA is unstable and Phase 8's part-rotation
+        // alignment is more intuitive).
+        private const double PartLabelAspectThresholdForRotate = 5.0;
+
         // Phase 2 defaults — keep BLF the default to preserve Phase 1 behavior.
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.BLF;
         private const bool DefaultAllowMirror = true;
@@ -426,7 +434,15 @@ namespace SeaNest.Commands
                             PartLabelPolelabelPrecisionIn * inToModel);
                         var labelOrigin = new Point3d(c.X, c.Y + yOffset, 0);
                         var labelPartPlane = new Plane(labelOrigin, Vector3d.ZAxis);
-                        double rotRad = pp.RotationDeg * Math.PI / 180.0;
+                        // Phase 11: elongated parts read along their long axis,
+                        // not along the engine's placement rotation. PCA's
+                        // principal-axis angle is the visual long axis; we use
+                        // it only when AspectRatio crosses the threshold, so
+                        // near-square parts (where PCA is unstable) keep
+                        // Phase 8's rotate-with-the-part behavior.
+                        double rotRad = pp.PlacedPolygon.AspectRatio > PartLabelAspectThresholdForRotate
+                            ? pp.PlacedPolygon.PrincipalAxisAngle
+                            : pp.RotationDeg * Math.PI / 180.0;
                         labelPartPlane.Rotate(rotRad, Vector3d.ZAxis);
 
                         var partLabel = TextEntity.Create(name, labelPartPlane, dimStyle, false, 0, 0);
