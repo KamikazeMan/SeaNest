@@ -196,78 +196,40 @@ namespace SeaNest.RhinoAdapters
 
         private static BrepFace FindLargestPlanarFace(Brep brep, double tolerance)
         {
-            var entries = new List<(BrepFace face, Plane plane, double area)>();
+            // Orientation-agnostic plate detection: largest planar face wins, full
+            // stop. Coplanarity grouping and the world-Z tiebreaker that the
+            // pre-7c.3 version used both biased toward "lying flat on world XY"
+            // and broke for orientation-arbitrary inputs (notably single-face
+            // NURBS Breps extracted from solids, where the parameterless
+            // TryGetPlane overload would silently fail at tight default
+            // tolerance even after IsPlanar(modelTol) succeeded). The explicit-
+            // tolerance TryGetPlane below matches Step 2's TryGetBrepPlane and
+            // closes that gap. Top/bottom-of-uniform-plate handedness ambiguity
+            // is acceptable: outer and inner loops travel through the same
+            // facePlane downstream, so cut output is geometrically invariant
+            // for symmetric stock.
+            BrepFace best = null;
+            double bestArea = -1;
+
             foreach (var face in brep.Faces)
             {
                 if (!face.IsPlanar(tolerance)) continue;
                 Plane plane;
-                if (!face.TryGetPlane(out plane)) continue;
+                if (!face.TryGetPlane(out plane, tolerance)) continue;
 
                 var faceBrep = face.DuplicateFace(false);
                 if (faceBrep == null) continue;
                 var amp = AreaMassProperties.Compute(faceBrep);
                 if (amp == null) continue;
 
-                entries.Add((face, plane, amp.Area));
-            }
-            if (entries.Count == 0) return null;
-
-            double normalTol = 1e-4;
-            double offsetTol = Math.Max(tolerance, 1e-6) * 10.0;
-
-            var groups = new List<(Vector3d normal, double offset, List<(BrepFace face, double area)> faces, double totalArea)>();
-
-            foreach (var e in entries)
-            {
-                Vector3d n = e.plane.Normal;
-                n.Unitize();
-                double offset = n * (Vector3d)e.plane.Origin;
-
-                bool matched = false;
-                for (int i = 0; i < groups.Count; i++)
+                if (amp.Area > bestArea)
                 {
-                    var g = groups[i];
-                    double dot = g.normal * n;
-                    bool parallel = Math.Abs(dot) > 1.0 - normalTol;
-                    if (!parallel) continue;
-
-                    double gOffset = dot > 0 ? g.offset : -g.offset;
-                    if (Math.Abs(gOffset - offset) > offsetTol) continue;
-
-                    g.faces.Add((e.face, e.area));
-                    g.totalArea += e.area;
-                    groups[i] = g;
-                    matched = true;
-                    break;
-                }
-                if (!matched)
-                {
-                    groups.Add((n, offset, new List<(BrepFace, double)> { (e.face, e.area) }, e.area));
+                    best = face;
+                    bestArea = amp.Area;
                 }
             }
 
-            int bestIdx = 0;
-            for (int i = 1; i < groups.Count; i++)
-            {
-                if (groups[i].totalArea > groups[bestIdx].totalArea + tolerance)
-                    bestIdx = i;
-                else if (Math.Abs(groups[i].totalArea - groups[bestIdx].totalArea) < tolerance &&
-                         groups[i].normal.Z > groups[bestIdx].normal.Z)
-                    bestIdx = i;
-            }
-
-            var winning = groups[bestIdx];
-            BrepFace winnerFace = winning.faces[0].face;
-            double winnerArea = winning.faces[0].area;
-            for (int i = 1; i < winning.faces.Count; i++)
-            {
-                if (winning.faces[i].area > winnerArea)
-                {
-                    winnerFace = winning.faces[i].face;
-                    winnerArea = winning.faces[i].area;
-                }
-            }
-            return winnerFace;
+            return best;
         }
 
         private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, List<Curve> innerLoopsOut)
