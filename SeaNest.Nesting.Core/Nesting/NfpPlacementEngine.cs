@@ -368,14 +368,12 @@ namespace SeaNest.Nesting.Core.Nesting
                 transform: combined,
                 rotationDeg: best.Orientation.RotationDeg,
                 isMirrored: best.Orientation.IsMirrored,
-                sourceBBoxMinX: srcBBox.MinX,
                 placedPolygon: placedPolygon));
 
             // Phase 7c.3.2.1 (TEMPORARY): readback from the just-constructed object.
             var ppJustAdded = placements[placements.Count - 1];
             DiagnosticLog?.Invoke(
                 $"PlacementResult constructed: part={ppJustAdded.OriginalIndex} " +
-                $"SourceBBoxMinX={ppJustAdded.SourceBBoxMinX:F3} " +
                 $"IsMirrored={ppJustAdded.IsMirrored}");
 
             var newPlaced = new PlacedItem(best.Orientation, best.X, best.Y);

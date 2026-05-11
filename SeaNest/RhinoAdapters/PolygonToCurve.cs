@@ -118,30 +118,33 @@ namespace SeaNest.RhinoAdapters
             if (working == null)
                 throw new InvalidOperationException("Failed to duplicate original curve.");
 
-            // Step 1: Mirror, if the placement is mirrored. The mirror axis is the line
-            // x = placement.SourceBBoxMinX — the part's source bbox-min X coordinate
-            // that OrientedPart.Build's X-flip is implicitly anchored to. For an outer
-            // curve this coincides with the curve's own bbox-min X; for a ride-along
-            // inner-loop curve it does NOT, which is why the axis must come from the
-            // placement (Phase 7c.3.1) rather than from the input curve itself.
+            // Step 1: Mirror, if the placement is mirrored. The mirror axis is the
+            // line x=0 in the source polygon's own coordinate frame, matching
+            // Polygon.Mirror's X-flip (x → -x). The engine's canonical polygon
+            // (and thus Transform) was built from a polygon that had this exact
+            // flip applied, so applying the same flip here reproduces the
+            // engine's geometry. Phase 7c.3.3 fix — earlier attempts using the
+            // curve's own bbox-min (pre-7c.3.1) or the part's source bbox-min
+            // (7c.3.1) were both wrong; Polygon.Mirror flips about x=0
+            // regardless of where the polygon sits in its source frame.
             //
-            // Rhino's Transform.Mirror takes a plane; we want a vertical plane through
-            // (SourceBBoxMinX, 0, 0) with normal = +X.
+            // Rhino's Transform.Mirror takes a plane; we want a vertical plane
+            // through (0, 0, 0) with normal = +X.
             if (placement.IsMirrored)
             {
-                // Phase 7c.3.2 (TEMPORARY): verify SourceBBoxMinX is being read
-                // with the expected value, and compare against the curve's own
-                // bbox-min X (what the pre-7c.3.1 buggy code would have used).
+                // Phase 7c.3.2 (TEMPORARY): keep the curve-bbox comparison
+                // visible so we can confirm the new x=0 axis is the right one
+                // for both outer and inner curves at runtime.
                 var curveBboxForDiag = working.GetBoundingBox(true);
                 double curveBboxMinX = curveBboxForDiag.Min.X;
-                double mirrorX = placement.SourceBBoxMinX;
+                double mirrorX = 0.0;
                 double delta = mirrorX - curveBboxMinX;
                 Rhino.RhinoApp.WriteLine(
-                    $"ToCurveFromOriginal mirror: placement.SourceBBoxMinX={mirrorX:F3} " +
+                    $"ToCurveFromOriginal mirror: mirrorX={mirrorX:F3} " +
                     $"curveBbox.Min.X={curveBboxMinX:F3} (delta={delta:F3})");
 
                 var mirrorPlane = new Plane(
-                    new Point3d(placement.SourceBBoxMinX, 0, 0),
+                    new Point3d(mirrorX, 0, 0),
                     Vector3d.XAxis);
                 var mirrorXform = Transform.Mirror(mirrorPlane);
                 working.Transform(mirrorXform);
