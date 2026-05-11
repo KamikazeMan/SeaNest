@@ -442,6 +442,43 @@ namespace SeaNest.RhinoAdapters
 
             var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
 
+            // Phase 7c.5: for PolyCurve inputs, attempt to coalesce constituent
+            // segments via Explode→JoinCurves before probing. BrepLoop.To3dCurve()
+            // commonly returns a polycurve of two NURBS half-circles for circular
+            // trims; TryGetCircle doesn't aggregate polycurve segments before
+            // testing, so each half individually fails the circle check. Joining
+            // the exploded segments produces a single curve whose whole-curve
+            // geometry TryGetCircle can identify as a circle within modelTol,
+            // promoting the output to ArcCurve and a DXF-native CIRCLE entity.
+            // Non-PolyCurve inputs skip this block and proceed to the direct
+            // probes below. Disposal of segments / joined results follows the
+            // file's existing convention (e.g. FlatBrepToPolygonOnPlane's
+            // JoinCurves call): rely on GC, no explicit cleanup.
+            if (curve is PolyCurve polyCurve)
+            {
+                var segments = polyCurve.Explode();
+                if (segments != null && segments.Length > 0)
+                {
+                    var joined = Curve.JoinCurves(segments, modelTol);
+                    if (joined != null && joined.Length == 1)
+                    {
+                        var coalesced = joined[0];
+                        if (coalesced.TryGetCircle(out Circle pcCircle, modelTol))
+                        {
+                            var arcCurve = new ArcCurve(pcCircle);
+                            if (!arcCurve.Transform(planeToXY)) return null;
+                            return arcCurve;
+                        }
+                        if (coalesced.TryGetArc(out Arc pcArc, modelTol))
+                        {
+                            var arcCurve = new ArcCurve(pcArc);
+                            if (!arcCurve.Transform(planeToXY)) return null;
+                            return arcCurve;
+                        }
+                    }
+                }
+            }
+
             // Probe for native shapes BEFORE the rigid transform: BrepLoop.To3dCurve()
             // hands back NURBS spans even when the trim is geometrically a perfect
             // circle or arc, so a direct DuplicateCurve preserves the NURBS form
