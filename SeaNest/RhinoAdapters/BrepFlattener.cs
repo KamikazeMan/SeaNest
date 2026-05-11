@@ -112,7 +112,7 @@ namespace SeaNest.RhinoAdapters
             var plateFace = FindLargestPlanarFace(brep, modelTol);
             if (plateFace != null)
             {
-                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, innerLoops);
+                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, innerLoops);
                 if (poly != null) return poly;
                 innerLoops.Clear();
             }
@@ -123,7 +123,7 @@ namespace SeaNest.RhinoAdapters
                 Plane plane;
                 if (TryGetBrepPlane(brep, modelTol, out plane))
                 {
-                    var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, innerLoops);
+                    var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, modelTol, innerLoops);
                     if (poly != null) return poly;
                     innerLoops.Clear();
                 }
@@ -134,7 +134,7 @@ namespace SeaNest.RhinoAdapters
             var unrolled = Unroll(brep, unrollTol, angleTolRad);
             if (unrolled != null)
             {
-                var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, innerLoops);
+                var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, modelTol, innerLoops);
                 if (poly != null) return poly;
                 innerLoops.Clear();
             }
@@ -236,7 +236,7 @@ namespace SeaNest.RhinoAdapters
             return winnerFace;
         }
 
-        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, List<Curve> innerLoopsOut)
+        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, List<Curve> innerLoopsOut)
         {
             Plane facePlane;
             if (!face.TryGetPlane(out facePlane)) return null;
@@ -265,7 +265,7 @@ namespace SeaNest.RhinoAdapters
 
             foreach (var c in rawInnerLoops)
             {
-                var projected = ProjectCurveToPlaneSpace(c, facePlane);
+                var projected = ProjectCurveToPlaneSpace(c, facePlane, modelTol);
                 if (projected != null) innerLoopsOut.Add(projected);
             }
 
@@ -293,7 +293,7 @@ namespace SeaNest.RhinoAdapters
 
         private static Polygon FlatBrepToPolygonOnPlane(
             Brep flatBrep, Plane plane, double joinTol, double discretizeTol, double angleTolRad,
-            List<Curve> innerLoopsOut)
+            double modelTol, List<Curve> innerLoopsOut)
         {
             var nakedEdges = new List<Curve>();
             foreach (var edge in flatBrep.Edges)
@@ -328,7 +328,7 @@ namespace SeaNest.RhinoAdapters
             foreach (var loop in closedLoops)
             {
                 if (ReferenceEquals(loop, outer)) continue;
-                var projected = ProjectCurveToPlaneSpace(loop, plane);
+                var projected = ProjectCurveToPlaneSpace(loop, plane, modelTol);
                 if (projected != null) innerLoopsOut.Add(projected);
             }
 
@@ -473,12 +473,35 @@ namespace SeaNest.RhinoAdapters
         /// matching the same fall-through pattern <see cref="FlattenRaw"/> uses for
         /// other helper failures.
         /// </summary>
-        private static Curve ProjectCurveToPlaneSpace(Curve curve, Plane plane)
+        private static Curve ProjectCurveToPlaneSpace(Curve curve, Plane plane, double modelTol)
         {
             if (curve == null) return null;
+
+            var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
+
+            // Probe for native shapes BEFORE the rigid transform: BrepLoop.To3dCurve()
+            // hands back NURBS spans even when the trim is geometrically a perfect
+            // circle or arc, so a direct DuplicateCurve preserves the NURBS form
+            // (22 control points for a circle). Recovering Circle/Arc here promotes
+            // those NURBS to ArcCurve, which survives the transform and exports as
+            // a native DXF circle/arc entity. Circle probed first because a full
+            // circle also matches TryGetArc — circle is the more specific verdict.
+            if (curve.TryGetCircle(out Circle circle, modelTol))
+            {
+                var arcCurve = new ArcCurve(circle);
+                if (!arcCurve.Transform(planeToXY)) return null;
+                return arcCurve;
+            }
+            if (curve.TryGetArc(out Arc arc, modelTol))
+            {
+                var arcCurve = new ArcCurve(arc);
+                if (!arcCurve.Transform(planeToXY)) return null;
+                return arcCurve;
+            }
+
+            // General case — preserves native subclass through Transform.
             var working = curve.DuplicateCurve();
             if (working == null) return null;
-            var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
             if (!working.Transform(planeToXY)) return null;
             return working;
         }
