@@ -362,6 +362,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 transform: combined,
                 rotationDeg: best.Orientation.RotationDeg,
                 isMirrored: best.Orientation.IsMirrored,
+                sourceBBoxMinX: srcBBox.MinX,
                 placedPolygon: placedPolygon));
 
             var newPlaced = new PlacedItem(best.Orientation, best.X, best.Y);

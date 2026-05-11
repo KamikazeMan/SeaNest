@@ -66,6 +66,24 @@ namespace SeaNest.Nesting.Core.Nesting
         public bool IsMirrored { get; }
 
         /// <summary>
+        /// X coordinate of the source polygon's bounding-box minimum, in the
+        /// pre-orientation (un-rotated, un-mirrored) source frame. Carried alongside
+        /// the placement so that draw-time mirror operations on ride-along curves
+        /// (e.g. Phase 7b inner-loop cut paths) can pivot about the part's source
+        /// bbox-min — same axis <see cref="OrientedPart.Build"/>'s X-flip implicitly
+        /// uses. For the outer polygon this coincides with the curve's own bbox-min
+        /// X by definition (the outer IS the part's outline); for inner-loop curves
+        /// it does not, which is why the value must travel with the placement
+        /// rather than being re-derived per curve.
+        ///
+        /// Only the X coordinate is exposed because <see cref="Polygon.Mirror"/> is
+        /// an X-flip (+ winding reversal); the mirror plane is vertical and Y is
+        /// indifferent. Add a SourceBBoxMinY companion only if a future operation
+        /// needs a non-vertical mirror.
+        /// </summary>
+        public double SourceBBoxMinX { get; }
+
+        /// <summary>
         /// The placed 2D polygon: original outline rotated, mirrored (if applicable), and
         /// translated to its final position on the sheet. Already in sheet-local coordinates;
         /// the only further transform needed at draw time is the per-sheet Y offset for
@@ -82,6 +100,7 @@ namespace SeaNest.Nesting.Core.Nesting
             Transform2D transform,
             double rotationDeg,
             bool isMirrored,
+            double sourceBBoxMinX,
             Polygon placedPolygon)
         {
             if (originalIndex < 0)
@@ -96,6 +115,7 @@ namespace SeaNest.Nesting.Core.Nesting
             Transform = transform;
             RotationDeg = rotationDeg;
             IsMirrored = isMirrored;
+            SourceBBoxMinX = sourceBBoxMinX;
             PlacedPolygon = placedPolygon;
         }
 
@@ -108,8 +128,9 @@ namespace SeaNest.Nesting.Core.Nesting
             int sheet,
             Transform2D transform,
             double rotationDeg,
+            double sourceBBoxMinX,
             Polygon placedPolygon)
-            : this(originalIndex, sheet, transform, rotationDeg, isMirrored: false, placedPolygon)
+            : this(originalIndex, sheet, transform, rotationDeg, isMirrored: false, sourceBBoxMinX, placedPolygon)
         {
         }
 

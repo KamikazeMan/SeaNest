@@ -119,18 +119,18 @@ namespace SeaNest.RhinoAdapters
                 throw new InvalidOperationException("Failed to duplicate original curve.");
 
             // Step 1: Mirror, if the placement is mirrored. The mirror axis is the line
-            // x = bboxMinX in the curve's own coordinate frame — equivalently, the
-            // X-flip-about-bbox-min that OrientedPart.Build applied to the polygon. This
-            // matches the convention in Polygon.Mirror() (X-flip + winding reversal).
+            // x = placement.SourceBBoxMinX — the part's source bbox-min X coordinate
+            // that OrientedPart.Build's X-flip is implicitly anchored to. For an outer
+            // curve this coincides with the curve's own bbox-min X; for a ride-along
+            // inner-loop curve it does NOT, which is why the axis must come from the
+            // placement (Phase 7c.3.1) rather than from the input curve itself.
             //
             // Rhino's Transform.Mirror takes a plane; we want a vertical plane through
-            // (bboxMinX, 0, 0) with normal = +X.
+            // (SourceBBoxMinX, 0, 0) with normal = +X.
             if (placement.IsMirrored)
             {
-                var bbox = working.GetBoundingBox(true);
-                double mirrorX = bbox.Min.X;
                 var mirrorPlane = new Plane(
-                    new Point3d(mirrorX, 0, 0),
+                    new Point3d(placement.SourceBBoxMinX, 0, 0),
                     Vector3d.XAxis);
                 var mirrorXform = Transform.Mirror(mirrorPlane);
                 working.Transform(mirrorXform);

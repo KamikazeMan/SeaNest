@@ -433,6 +433,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 sheetIdx,
                 combined,
                 best.RotationDeg,
+                origBBox.MinX,
                 finalPolygon));
 
             sheet.Placed.Add(finalPolygon);
