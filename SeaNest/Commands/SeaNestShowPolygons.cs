@@ -36,7 +36,7 @@ namespace SeaNest.Commands
                 RhinoApp.WriteLine("Could not flatten.");
                 return Result.Failure;
             }
-            var poly = flat.Outer;
+            var poly = flat.OuterPolygon;
 
             // Draw the polygon as a closed polyline with each vertex as a point object.
             var polyline = new Polyline(poly.Count + 1);

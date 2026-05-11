@@ -71,7 +71,7 @@ namespace SeaNest.RhinoAdapters
 
         public static BrepFlattenResult Flatten(Brep brep, RhinoDoc doc)
         {
-            var raw = FlattenRaw(brep, doc, out var innerLoops);
+            var raw = FlattenRaw(brep, doc, out var outerCurve, out var innerLoops);
             if (raw == null) return null;
 
             // Pre-NFP simplification: collapse arc densification from
@@ -92,13 +92,15 @@ namespace SeaNest.RhinoAdapters
                     $"Brep at a coarser angle tolerance if this fires often.");
             }
 
-            // Inner loops are NOT simplified — fidelity matters for cut output, and
-            // they don't enter NFP so MinkowskiDiff cost is not a concern.
-            return new BrepFlattenResult(simplified, innerLoops);
+            // Outer native curve and inner loops are NOT simplified — fidelity
+            // matters for cut output, they don't enter NFP, and the renderer
+            // consumes them directly.
+            return new BrepFlattenResult(simplified, outerCurve, innerLoops);
         }
 
-        private static Polygon FlattenRaw(Brep brep, RhinoDoc doc, out List<Curve> innerLoops)
+        private static Polygon FlattenRaw(Brep brep, RhinoDoc doc, out Curve outerCurve, out List<Curve> innerLoops)
         {
+            outerCurve = null;
             innerLoops = new List<Curve>();
 
             if (brep == null) throw new ArgumentNullException(nameof(brep));
@@ -112,8 +114,9 @@ namespace SeaNest.RhinoAdapters
             var plateFace = FindLargestPlanarFace(brep, modelTol);
             if (plateFace != null)
             {
-                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, innerLoops);
+                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
                 if (poly != null) return poly;
+                outerCurve = null;
                 innerLoops.Clear();
             }
 
@@ -123,8 +126,9 @@ namespace SeaNest.RhinoAdapters
                 Plane plane;
                 if (TryGetBrepPlane(brep, modelTol, out plane))
                 {
-                    var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, modelTol, innerLoops);
+                    var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
                     if (poly != null) return poly;
+                    outerCurve = null;
                     innerLoops.Clear();
                 }
             }
@@ -134,22 +138,26 @@ namespace SeaNest.RhinoAdapters
             var unrolled = Unroll(brep, unrollTol, angleTolRad);
             if (unrolled != null)
             {
-                var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, modelTol, innerLoops);
+                var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
                 if (poly != null) return poly;
+                outerCurve = null;
                 innerLoops.Clear();
             }
 
             // Step 4: Fallback — squish the largest face regardless of planarity.
+            // No native source curve exists for a meshed-and-squished surface; the
+            // renderer will fall back to drawing the placed polygon directly.
             var squishFace = FindLargestFace(brep);
             if (squishFace != null)
             {
-                var poly = SquishFaceToPolygon(squishFace, discretizeTol, angleTolRad, innerLoops);
+                var poly = SquishFaceToPolygon(squishFace, discretizeTol, angleTolRad, out outerCurve, innerLoops);
                 if (poly != null)
                 {
                     SquishWarning?.Invoke(
                         "Squish flattening used — dimensions may be approximate for curved parts.");
                     return poly;
                 }
+                outerCurve = null;
                 innerLoops.Clear();
             }
 
@@ -198,8 +206,10 @@ namespace SeaNest.RhinoAdapters
             return best;
         }
 
-        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, List<Curve> innerLoopsOut)
+        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, out Curve outerCurveOut, List<Curve> innerLoopsOut)
         {
+            outerCurveOut = null;
+
             Plane facePlane;
             if (!face.TryGetPlane(out facePlane)) return null;
 
@@ -224,6 +234,11 @@ namespace SeaNest.RhinoAdapters
 
             var outerPoly = CurveToPolygonOnPlane(outerLoop, facePlane, discretizeTol, angleTolRad);
             if (outerPoly == null) return null;
+
+            // Phase 9a: route the outer's native curve through the same
+            // plane-space projection inner loops use. Null on projection
+            // failure — renderer falls back to the polygon path.
+            outerCurveOut = ProjectCurveToPlaneSpace(outerLoop, facePlane, modelTol);
 
             foreach (var c in rawInnerLoops)
             {
@@ -255,8 +270,10 @@ namespace SeaNest.RhinoAdapters
 
         private static Polygon FlatBrepToPolygonOnPlane(
             Brep flatBrep, Plane plane, double joinTol, double discretizeTol, double angleTolRad,
-            double modelTol, List<Curve> innerLoopsOut)
+            double modelTol, out Curve outerCurveOut, List<Curve> innerLoopsOut)
         {
+            outerCurveOut = null;
+
             var nakedEdges = new List<Curve>();
             foreach (var edge in flatBrep.Edges)
             {
@@ -287,6 +304,11 @@ namespace SeaNest.RhinoAdapters
 
             var outerPoly = CurveToPolygonOnPlane(outer, plane, discretizeTol, angleTolRad);
             if (outerPoly == null) return null;
+
+            // Phase 9a: route the outer's native curve through plane-space
+            // projection alongside the polygon. Null on projection failure —
+            // renderer falls back to the polygon path.
+            outerCurveOut = ProjectCurveToPlaneSpace(outer, plane, modelTol);
 
             foreach (var loop in closedLoops)
             {
@@ -332,8 +354,13 @@ namespace SeaNest.RhinoAdapters
         /// the underlying surface of a Patch or trimmed NURBS extends beyond the visible face,
         /// and SquishSurface on it produces a wrong-shaped output.
         /// </summary>
-        private static Polygon SquishFaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, List<Curve> innerLoopsOut)
+        private static Polygon SquishFaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, out Curve outerCurveOut, List<Curve> innerLoopsOut)
         {
+            // Phase 9a: Squish has no native source curve — output is meshed-and-
+            // squished polylines. Renderer falls back to drawing the placed
+            // polygon directly for parts that came through this path.
+            outerCurveOut = null;
+
             var faceBrep = face.DuplicateFace(false);
             if (faceBrep == null) return null;
 

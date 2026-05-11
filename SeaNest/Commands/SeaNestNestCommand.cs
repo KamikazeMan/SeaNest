@@ -156,6 +156,10 @@ namespace SeaNest.Commands
             // Phase 7b: parallel per-part inner-loop table indexed by polygons[i].
             // Bypasses the nesting engine entirely; consumed only at draw time.
             var innerLoopsPerPart = new List<IReadOnlyList<Curve>>();
+            // Phase 9a: parallel per-part native outer curve, same alignment
+            // convention. Used at draw time for high-fidelity outer rendering;
+            // null entries fall back to drawing the placed polygon.
+            var outerCurvePerPart = new List<Curve>();
             // Phase 8: parallel per-part Name table, same alignment convention.
             var namesPerPart = new List<string>();
             for (int i = 0; i < breps.Count; i++)
@@ -167,8 +171,9 @@ namespace SeaNest.Commands
                 }
                 else
                 {
-                    polygons.Add(flat.Outer);
+                    polygons.Add(flat.OuterPolygon);
                     innerLoopsPerPart.Add(flat.InnerLoops);
+                    outerCurvePerPart.Add(flat.OuterCurve);
                     namesPerPart.Add(brepNames[i]);
                 }
             }
@@ -248,7 +253,7 @@ namespace SeaNest.Commands
                 return Rhino.Commands.Result.Nothing;
             }
 
-            DrawNestingResult(doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric, innerLoopsPerPart, namesPerPart);
+            DrawNestingResult(doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric, innerLoopsPerPart, namesPerPart, outerCurvePerPart);
 
             int mirrored = response.Placements.Count(p => p.IsMirrored);
             string mirrorNote = mirrored > 0 ? $", {mirrored} mirrored" : "";
@@ -276,7 +281,8 @@ namespace SeaNest.Commands
             double sheetW, double sheetH, double sheetT,
             double margin, double inToModel, bool isMetric,
             IReadOnlyList<IReadOnlyList<Curve>> innerLoopsPerPart = null,
-            IReadOnlyList<string> namesPerPart = null)
+            IReadOnlyList<string> namesPerPart = null,
+            IReadOnlyList<Curve> outerCurvePerPart = null)
         {
             // Phase 8: SLF-RHN Architect font lookup, plus a one-per-command
             // warning if the font isn't available (Rhino bundles it, but a
@@ -338,7 +344,40 @@ namespace SeaNest.Commands
             foreach (var pp in response.Placements)
             {
                 double yOffset = pp.Sheet * sheetStride;
-                var partCurve = PolygonToCurve.ToCurve(pp.PlacedPolygon, yOffset);
+
+                // Phase 9a — outer-draw branch. Two paths, both correctly placed:
+                //
+                //   Native-curve path: when BrepFlattener captured the outer's
+                //   source Rhino curve (typical for Step 1/2/3 — flat or unrolled
+                //   Breps), route it through ToCurveFromOriginal so the same
+                //   placement transform the engine applied to the polygon
+                //   (rotation, translation, mirror via source bbox-center X) lands
+                //   the native curve in the right sheet position. Native subclass
+                //   survives the rigid transform: NurbsCurve stays NurbsCurve,
+                //   ArcCurve stays ArcCurve. Smooth output, faceting gone, DXF
+                //   exports native SPLINE/ARC/CIRCLE entities for the outline.
+                //
+                //   Polygon-fallback path: when no native curve is available
+                //   (Squish-path parts had no source curve, or an extraction
+                //   failure produced null), draw the engine's PlacedPolygon
+                //   directly — same behavior as pre-9a. Polygonal output, but
+                //   correctly placed and verified by FinalVerifier.
+                //
+                // Both paths produce geometry on the same SeaNest_Nested layer
+                // and both feed into the same per-sheet stacking and global
+                // 90°-Z rotation, so downstream code sees no difference.
+                Curve partCurve;
+                if (outerCurvePerPart != null
+                    && pp.OriginalIndex < outerCurvePerPart.Count
+                    && outerCurvePerPart[pp.OriginalIndex] != null)
+                {
+                    partCurve = PolygonToCurve.ToCurveFromOriginal(
+                        outerCurvePerPart[pp.OriginalIndex], pp, yOffset);
+                }
+                else
+                {
+                    partCurve = PolygonToCurve.ToCurve(pp.PlacedPolygon, yOffset);
+                }
                 var partAttrs = new ObjectAttributes { LayerIndex = layerNestedIdx };
                 var partId = doc.Objects.AddCurve(partCurve, partAttrs);
                 if (partId != Guid.Empty) createdObjectIds.Add(partId);

@@ -7,33 +7,76 @@ namespace SeaNest.RhinoAdapters
 {
     /// <summary>
     /// Result of flattening a Brep for nesting: the outer 2D <see cref="Polygon"/>
-    /// the engine sees, plus any inner-loop cut curves (pipe holes, hatch cutouts)
-    /// that ride along untouched into the rendered nest.
+    /// the engine sees, the matching native Rhino curve for high-fidelity
+    /// rendering, plus any inner-loop cut curves (pipe holes, hatch cutouts) that
+    /// ride along untouched into the rendered nest.
     ///
     /// Inner loops bypass the nesting engine entirely — placement, NFP, BLF,
-    /// overlap checks and FinalVerifier all operate on the outer ring only. The
+    /// overlap checks and FinalVerifier all operate on the outer polygon only. The
     /// orchestrator carries the inner loops alongside in a parallel per-part table
     /// keyed by polygon (= brep) index, and at draw time applies the same
     /// translate+rotate+mirror transform the placed outer received via
     /// <see cref="PolygonToCurve.ToCurveFromOriginal"/>. Parts still nest as solid
     /// envelopes from the algorithm's perspective; we just don't drop the holes
     /// from the cut output.
+    ///
+    /// Phase 9a adds the parallel <see cref="OuterCurve"/> native form for the
+    /// outer outline. The engine continues to consume <see cref="OuterPolygon"/>
+    /// (heavily simplified, fast NFP); the renderer prefers <see cref="OuterCurve"/>
+    /// when available to emit smooth native geometry instead of the engine's
+    /// faceted polygon.
     /// </summary>
     public sealed class BrepFlattenResult
     {
-        /// <summary>Outer boundary polygon as the engine sees it (post-simplification).</summary>
-        public Polygon Outer { get; }
+        /// <summary>
+        /// Outer boundary polygon as the engine sees it (post-simplification).
+        /// This is what flows into <see cref="SeaNest.Nesting.Core.Nesting.NestRequest.Polygons"/>
+        /// and becomes <see cref="SeaNest.Nesting.Core.Nesting.PlacementResult.PlacedPolygon"/>
+        /// after placement. Vertex count is capped by BrepFlattener's simplification
+        /// pass (typically a few hundred); the renderer can use <see cref="OuterCurve"/>
+        /// to bypass the polygonal facets when smoother output is desired.
+        /// </summary>
+        public Polygon OuterPolygon { get; }
+
+        /// <summary>
+        /// Native Rhino curve corresponding to <see cref="OuterPolygon"/>, in the
+        /// same world-XY plane-local frame (Z=0), produced by routing the brep loop's
+        /// native curve through <see cref="BrepFlattener.ProjectCurveToPlaneSpace"/>.
+        /// Preserves the original curve's subclass (<see cref="NurbsCurve"/>,
+        /// <see cref="PolyCurve"/>, <see cref="ArcCurve"/>, etc.), so smooth arcs
+        /// stay smooth and the DXF output emits native SPLINE/ARC/CIRCLE entities
+        /// instead of polylines.
+        ///
+        /// <b>Nullable.</b> Null when the Squish fallback path produces the
+        /// polygon — meshed-and-squished surfaces have no native source curve to
+        /// recover. The renderer falls back to drawing
+        /// <see cref="SeaNest.Nesting.Core.Nesting.PlacementResult.PlacedPolygon"/>
+        /// directly in that case.
+        ///
+        /// <b>Bbox-discrepancy caveat.</b> The native curve's bounding box is
+        /// generally a superset of <see cref="OuterPolygon"/>'s, by up to
+        /// <c>discretizeTol + simplificationTol</c> (≤ 0.005" typical, ≤ 0.04" worst
+        /// case after escalation). On mirrored placements,
+        /// <see cref="PolygonToCurve.ToCurveFromOriginal"/> mirrors about the polygon's
+        /// bbox-center X — the placed native curve can therefore extend that same
+        /// amount beyond where the polygon-based math expects. Below the typical
+        /// 0.25" spacing parameter by 6×; invisible at cut tolerances. Mitigation if
+        /// it ever bites is to tighten BrepFlattener's simplification tolerance.
+        /// </summary>
+        public Curve OuterCurve { get; }
 
         /// <summary>
         /// Inner-loop cut curves in the same world-XY coordinate frame as
-        /// <see cref="Outer"/>. Closed PolylineCurves at Z=0. Empty list if the
-        /// part has no holes; never null.
+        /// <see cref="OuterPolygon"/>. Native curve subclasses (closed PolylineCurve,
+        /// ArcCurve, NurbsCurve …) at Z=0. Empty list if the part has no holes;
+        /// never null.
         /// </summary>
         public IReadOnlyList<Curve> InnerLoops { get; }
 
-        public BrepFlattenResult(Polygon outer, IReadOnlyList<Curve> innerLoops)
+        public BrepFlattenResult(Polygon outerPolygon, Curve outerCurve, IReadOnlyList<Curve> innerLoops)
         {
-            Outer = outer ?? throw new ArgumentNullException(nameof(outer));
+            OuterPolygon = outerPolygon ?? throw new ArgumentNullException(nameof(outerPolygon));
+            OuterCurve = outerCurve;   // may be null — Squish path has no native source
             InnerLoops = innerLoops ?? Array.Empty<Curve>();
         }
     }
