@@ -265,8 +265,8 @@ namespace SeaNest.RhinoAdapters
 
             foreach (var c in rawInnerLoops)
             {
-                var pc = CurveToPolylineCurveOnPlane(c, facePlane, discretizeTol, angleTolRad);
-                if (pc != null) innerLoopsOut.Add(pc);
+                var projected = ProjectCurveToPlaneSpace(c, facePlane);
+                if (projected != null) innerLoopsOut.Add(projected);
             }
 
             return outerPoly;
@@ -328,8 +328,8 @@ namespace SeaNest.RhinoAdapters
             foreach (var loop in closedLoops)
             {
                 if (ReferenceEquals(loop, outer)) continue;
-                var pc = CurveToPolylineCurveOnPlane(loop, plane, discretizeTol, angleTolRad);
-                if (pc != null) innerLoopsOut.Add(pc);
+                var projected = ProjectCurveToPlaneSpace(loop, plane);
+                if (projected != null) innerLoopsOut.Add(projected);
             }
 
             return outerPoly;
@@ -454,45 +454,33 @@ namespace SeaNest.RhinoAdapters
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// Sister of <see cref="CurveToPolygonOnPlane"/> that emits a closed
-        /// <see cref="PolylineCurve"/> at world-XY (Z=0) for inner-loop cut output.
-        /// Used by Phase 7b inner-loop preservation: the outer ring becomes a
-        /// <see cref="Polygon"/> for the engine, but inner loops bypass the engine
-        /// and travel as Rhino curves to <see cref="PolygonToCurve.ToCurveFromOriginal"/>
-        /// at draw time.
+        /// Project a curve lying on <paramref name="plane"/> into the plane's UV frame,
+        /// expressed as a Rhino curve in world XY at Z=0. Used by Phase 7b inner-loop
+        /// preservation, Phase 7b.2 upgrade: <see cref="Transform.PlaneToPlane"/> is a
+        /// rigid transform — the curve's native subclass (ArcCurve, LineCurve,
+        /// PolylineCurve, NurbsCurve, …) survives, so circles stay circles, arcs stay
+        /// arcs, all the way through <see cref="PolygonToCurve.ToCurveFromOriginal"/>
+        /// and into the DXF export. No per-vertex sampling, no over-tessellation —
+        /// a 3" circle in the source emits one ArcCurve, not a 1024-vertex polyline.
+        ///
+        /// Coordinate equivalence with the outer's <see cref="CurveToPolygonOnPlane"/>
+        /// helper is exact: <c>PlaneToPlane(plane, WorldXY)</c> maps
+        /// <c>plane.PointAt(u, v) → (u, v, 0)</c> in world XYZ, the same (u, v) values
+        /// that <see cref="Plane.ClosestParameter"/> returns per-vertex in the
+        /// polygon-projection path.
+        ///
+        /// Returns null if duplication or transformation fails — caller skips the loop,
+        /// matching the same fall-through pattern <see cref="FlattenRaw"/> uses for
+        /// other helper failures.
         /// </summary>
-        private static PolylineCurve CurveToPolylineCurveOnPlane(Curve curve, Plane plane, double discretizeTol, double angleTolRad)
+        private static Curve ProjectCurveToPlaneSpace(Curve curve, Plane plane)
         {
-            Polyline polyline;
-            if (!curve.TryGetPolyline(out polyline))
-            {
-                var polylineCurve = curve.ToPolyline(
-                    mainSegmentCount: 0,
-                    subSegmentCount: 0,
-                    maxAngleRadians: angleTolRad,
-                    maxChordLengthRatio: 0,
-                    maxAspectRatio: 0,
-                    tolerance: discretizeTol,
-                    minEdgeLength: 0,
-                    maxEdgeLength: 0,
-                    keepStartPoint: true);
-                if (polylineCurve == null || !polylineCurve.TryGetPolyline(out polyline))
-                    return null;
-            }
-            if (polyline == null || polyline.Count < 3) return null;
-
-            var projected = new Polyline(polyline.Count + 1);
-            for (int i = 0; i < polyline.Count; i++)
-            {
-                double u, v;
-                if (!plane.ClosestParameter(polyline[i], out u, out v)) return null;
-                projected.Add(u, v, 0);
-            }
-            if (projected.Count < 3) return null;
-            if (!projected.IsClosed) projected.Add(projected[0]);
-            if (projected.Count < 4) return null;
-
-            return new PolylineCurve(projected);
+            if (curve == null) return null;
+            var working = curve.DuplicateCurve();
+            if (working == null) return null;
+            var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
+            if (!working.Transform(planeToXY)) return null;
+            return working;
         }
 
         private static Polygon CurveToPolygonOnPlane(Curve curve, Plane plane, double discretizeTol, double angleTolRad)
