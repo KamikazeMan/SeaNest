@@ -120,6 +120,265 @@ namespace SeaNest.Nesting.Core.Geometry
         }
 
         /// <summary>
+        /// Return the "pole of inaccessibility" — the point inside the polygon
+        /// farthest from any edge. For convex polygons this is near the centroid;
+        /// for concave polygons (notched plates, fantail panels with deep inward
+        /// curves) it remains inside the solid body, where the centroid can fall
+        /// outside. Useful as a visually-centered anchor for labels, dimensions,
+        /// or any annotation that must land on the part itself rather than in a
+        /// notch or beyond the outline.
+        ///
+        /// Algorithm: Mapbox Polylabel. Quadtree-style search via a max-heap of
+        /// square cells keyed on each cell's maximum possible signed distance to
+        /// the boundary (cell.d + cell.h·√2). Cells are subdivided into 4
+        /// quadrants only while their potential can still beat the best-so-far
+        /// by more than <paramref name="precision"/>. The centroid and the bbox
+        /// center seed the initial candidate so the algorithm starts with a
+        /// reasonable lower bound and converges fast.
+        ///
+        /// <para>
+        /// Pre-allocates the heap with a small initial capacity; subdivision
+        /// rarely produces more than a few hundred cells in practice. Per-cell
+        /// cost is O(n) where n is the polygon vertex count (one pass over edges
+        /// for signed distance + even-odd inside test). Total cost ~100µs-4ms per
+        /// typical plate part; imperceptible against NFP compute time.
+        /// </para>
+        ///
+        /// <para>
+        /// <paramref name="precision"/> in model units. Values below 0.5" are
+        /// invisible at typical label sizes; values above 5% of the polygon's
+        /// smaller bbox extent start to drift the anchor noticeably. Standard
+        /// choice is around 0.5"; the algorithm terminates when no remaining
+        /// cell could improve the best by more than this.
+        /// </para>
+        ///
+        /// <para>
+        /// Returns <see cref="Centroid"/> as a fallback if the polygon's
+        /// bounding box is degenerate (zero width or height).
+        /// </para>
+        /// </summary>
+        public Point2D PoleOfInaccessibility(double precision)
+        {
+            if (precision <= 0)
+                throw new ArgumentException("Precision must be positive.", nameof(precision));
+
+            var bbox = BoundingBox;
+            double width = bbox.MaxX - bbox.MinX;
+            double height = bbox.MaxY - bbox.MinY;
+            double cellSize = Math.Min(width, height);
+            if (cellSize <= 0)
+                return Centroid;
+
+            double h = cellSize / 2.0;
+
+            var queue = new PoleCellHeap(initialCapacity: 64);
+
+            // Seed with a uniform grid of cellSize-square cells covering the
+            // bbox. Cells whose centers fall outside the polygon get negative
+            // signed distance; they're not discarded — their max-potential
+            // (d + h·√2) may still be positive and subdivision may yield
+            // children whose centers fall inside.
+            for (double x = bbox.MinX; x < bbox.MaxX; x += cellSize)
+            {
+                for (double y = bbox.MinY; y < bbox.MaxY; y += cellSize)
+                {
+                    queue.Push(new PoleCell(x + h, y + h, h, this));
+                }
+            }
+
+            // Initial candidate: centroid (often a good starting bound).
+            var centroid = Centroid;
+            var best = new PoleCell(centroid.X, centroid.Y, 0, this);
+
+            // Bounding-box center as a fallback initial candidate — for
+            // concave shapes whose centroid falls outside the polygon, the
+            // bbox center is sometimes a better bound.
+            var bboxCenter = new PoleCell(bbox.MinX + width / 2.0, bbox.MinY + height / 2.0, 0, this);
+            if (bboxCenter.D > best.D) best = bboxCenter;
+
+            while (queue.Count > 0)
+            {
+                var cell = queue.Pop();
+
+                if (cell.D > best.D) best = cell;
+
+                // Prune: this cell's best possible interior point can't
+                // outperform the current best by more than precision.
+                if (cell.Max - best.D <= precision) continue;
+
+                double newH = cell.H / 2.0;
+                queue.Push(new PoleCell(cell.X - newH, cell.Y - newH, newH, this));
+                queue.Push(new PoleCell(cell.X + newH, cell.Y - newH, newH, this));
+                queue.Push(new PoleCell(cell.X - newH, cell.Y + newH, newH, this));
+                queue.Push(new PoleCell(cell.X + newH, cell.Y + newH, newH, this));
+            }
+
+            return new Point2D(best.X, best.Y);
+        }
+
+        /// <summary>
+        /// Signed distance from <c>(px, py)</c> to the polygon's boundary. Positive
+        /// inside the polygon, negative outside. Single pass over edges that
+        /// simultaneously computes the minimum point-to-segment distance and
+        /// runs the even-odd ray-crossing inside test — efficient for
+        /// <see cref="PoleOfInaccessibility"/>'s per-cell evaluation.
+        /// </summary>
+        private double SignedDistanceToBoundary(double px, double py)
+        {
+            double minDistSq = double.MaxValue;
+            bool inside = false;
+            int n = _points.Length;
+
+            for (int i = 0, j = n - 1; i < n; j = i++)
+            {
+                var a = _points[i];
+                var b = _points[j];
+
+                // Even-odd inside test: count edges crossed by a +X ray from (px, py).
+                // Edge (a, b) crosses the horizontal line y = py iff a.Y and b.Y
+                // straddle py; the crossing's X is computed by linear interpolation.
+                if ((a.Y > py) != (b.Y > py) &&
+                    px < (b.X - a.X) * (py - a.Y) / (b.Y - a.Y) + a.X)
+                {
+                    inside = !inside;
+                }
+
+                double dsq = DistSqToSegment(px, py, a, b);
+                if (dsq < minDistSq) minDistSq = dsq;
+            }
+
+            double d = Math.Sqrt(minDistSq);
+            return inside ? d : -d;
+        }
+
+        /// <summary>
+        /// Squared distance from a point to a line segment in 2D. Standard
+        /// projection-then-clamp implementation; returns squared distance to
+        /// avoid an unnecessary sqrt per edge in the
+        /// <see cref="SignedDistanceToBoundary"/> hot loop (sqrt is taken once
+        /// after the min is known).
+        /// </summary>
+        private static double DistSqToSegment(double px, double py, Point2D a, Point2D b)
+        {
+            double dx = b.X - a.X;
+            double dy = b.Y - a.Y;
+            double lenSq = dx * dx + dy * dy;
+
+            if (lenSq == 0.0)
+            {
+                double pdx = px - a.X;
+                double pdy = py - a.Y;
+                return pdx * pdx + pdy * pdy;
+            }
+
+            double t = ((px - a.X) * dx + (py - a.Y) * dy) / lenSq;
+            if (t < 0.0) t = 0.0;
+            else if (t > 1.0) t = 1.0;
+
+            double cx = a.X + t * dx;
+            double cy = a.Y + t * dy;
+            double ex = px - cx;
+            double ey = py - cy;
+            return ex * ex + ey * ey;
+        }
+
+        /// <summary>
+        /// One square cell in <see cref="PoleOfInaccessibility"/>'s quadtree
+        /// search. Center <c>(X, Y)</c>, half-size <c>H</c>, signed distance
+        /// from center to boundary <c>D</c>, and <c>Max = D + H·√2</c> — the
+        /// upper bound on signed distance for any point inside this cell
+        /// (corner is at distance H·√2 from center). Immutable; constructed
+        /// at push time so the heap comparator reads cached <c>Max</c>.
+        /// </summary>
+        private readonly struct PoleCell
+        {
+            public readonly double X;
+            public readonly double Y;
+            public readonly double H;
+            public readonly double D;
+            public readonly double Max;
+
+            public PoleCell(double x, double y, double h, Polygon poly)
+            {
+                X = x;
+                Y = y;
+                H = h;
+                D = poly.SignedDistanceToBoundary(x, y);
+                Max = D + h * Math.Sqrt(2.0);
+            }
+        }
+
+        /// <summary>
+        /// Bespoke max-heap of <see cref="PoleCell"/>s keyed on
+        /// <see cref="PoleCell.Max"/>. Array-backed, pre-allocated to a small
+        /// capacity to avoid early List grows. .NET 6+ has
+        /// <c>System.Collections.Generic.PriorityQueue</c> but this lib targets
+        /// netstandard2.0 which doesn't, so we ship our own ~30-line heap.
+        ///
+        /// Standard binary-heap algorithm: sift-up on <see cref="Push"/>,
+        /// sift-down on <see cref="Pop"/>. Both O(log n). The comparator is
+        /// "highest Max wins": parents have >= Max than children.
+        /// </summary>
+        private sealed class PoleCellHeap
+        {
+            private readonly List<PoleCell> _items;
+
+            public PoleCellHeap(int initialCapacity)
+            {
+                _items = new List<PoleCell>(initialCapacity);
+            }
+
+            public int Count => _items.Count;
+
+            public void Push(PoleCell cell)
+            {
+                _items.Add(cell);
+                SiftUp(_items.Count - 1);
+            }
+
+            public PoleCell Pop()
+            {
+                var top = _items[0];
+                int last = _items.Count - 1;
+                _items[0] = _items[last];
+                _items.RemoveAt(last);
+                if (_items.Count > 0) SiftDown(0);
+                return top;
+            }
+
+            private void SiftUp(int i)
+            {
+                while (i > 0)
+                {
+                    int parent = (i - 1) / 2;
+                    if (_items[i].Max <= _items[parent].Max) break;
+                    var tmp = _items[i];
+                    _items[i] = _items[parent];
+                    _items[parent] = tmp;
+                    i = parent;
+                }
+            }
+
+            private void SiftDown(int i)
+            {
+                int n = _items.Count;
+                while (true)
+                {
+                    int left = 2 * i + 1;
+                    int right = 2 * i + 2;
+                    int best = i;
+                    if (left < n && _items[left].Max > _items[best].Max) best = left;
+                    if (right < n && _items[right].Max > _items[best].Max) best = right;
+                    if (best == i) break;
+                    var tmp = _items[i];
+                    _items[i] = _items[best];
+                    _items[best] = tmp;
+                    i = best;
+                }
+            }
+        }
+
+        /// <summary>
         /// True if the polygon is convex — every interior angle ≤ 180° (winding-
         /// agnostic: works for both CCW and CW polygons). Computed lazily and
         /// cached.

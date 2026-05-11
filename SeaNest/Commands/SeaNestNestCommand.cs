@@ -39,6 +39,12 @@ namespace SeaNest.Commands
         private const double PartLabelScale = 5.0;
         private const string PartLabelFontFace = "SLF-RHN Architect";
 
+        // Phase 10 — pole-of-inaccessibility precision for label anchor placement.
+        // 0.5" is well below the 0.5"-tall label glyph (2.5" after dim-scale 5),
+        // so sub-half-inch label shifts within the part body are visually
+        // imperceptible. Tuned for plate parts in the 10"-300" range.
+        private const double PartLabelPolelabelPrecisionIn = 0.5;
+
         // Phase 2 defaults — keep BLF the default to preserve Phase 1 behavior.
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.BLF;
         private const bool DefaultAllowMirror = true;
@@ -412,7 +418,12 @@ namespace SeaNest.Commands
                     string name = namesPerPart[pp.OriginalIndex];
                     if (!string.IsNullOrWhiteSpace(name))
                     {
-                        var c = pp.PlacedPolygon.Centroid;
+                        // Phase 10: pole-of-inaccessibility instead of centroid so
+                        // labels land inside the part body even when the polygon is
+                        // concave (notched plates, fantail panels with deep inward
+                        // curves where the centroid can fall outside the solid).
+                        var c = pp.PlacedPolygon.PoleOfInaccessibility(
+                            PartLabelPolelabelPrecisionIn * inToModel);
                         var labelOrigin = new Point3d(c.X, c.Y + yOffset, 0);
                         var labelPartPlane = new Plane(labelOrigin, Vector3d.ZAxis);
                         double rotRad = pp.RotationDeg * Math.PI / 180.0;
