@@ -32,6 +32,13 @@ namespace SeaNest.Commands
         private const double LabelHeightIn = 6.0;
         private const double LabelStrideFactor = 3.0;
 
+        // Phase 8 — per-part labels (object name) emitted on the SeaNest_Labels layer.
+        // Smaller than the sheet-size labels; dimension scale 5 makes them visible at
+        // boat-model zoom levels while keeping underlying geometry at 0.5".
+        private const double PartLabelHeightIn = 0.5;
+        private const double PartLabelScale = 5.0;
+        private const string PartLabelFontFace = "SLF-RHN Architect";
+
         // Phase 2 defaults — keep BLF the default to preserve Phase 1 behavior.
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.BLF;
         private const bool DefaultAllowMirror = true;
@@ -99,6 +106,11 @@ namespace SeaNest.Commands
                 return go.CommandResult();
 
             var breps = new List<Brep>();
+            // Phase 8: parallel-per-brep name capture from each source object's
+            // attributes. Null when the object has no Name set — we'll skip those
+            // at label-emit time. The list stays aligned with `breps` so the same
+            // skip-on-no-Brep semantics propagate downstream.
+            var brepNames = new List<string>();
             for (int i = 0; i < go.ObjectCount; i++)
             {
                 var obj = go.Object(i);
@@ -108,7 +120,11 @@ namespace SeaNest.Commands
                     var ext = obj.Geometry() as Extrusion;
                     if (ext != null) brep = ext.ToBrep();
                 }
-                if (brep != null) breps.Add(brep);
+                if (brep != null)
+                {
+                    breps.Add(brep);
+                    brepNames.Add(obj.Object()?.Attributes?.Name);
+                }
             }
 
             if (breps.Count == 0)
@@ -140,6 +156,8 @@ namespace SeaNest.Commands
             // Phase 7b: parallel per-part inner-loop table indexed by polygons[i].
             // Bypasses the nesting engine entirely; consumed only at draw time.
             var innerLoopsPerPart = new List<IReadOnlyList<Curve>>();
+            // Phase 8: parallel per-part Name table, same alignment convention.
+            var namesPerPart = new List<string>();
             for (int i = 0; i < breps.Count; i++)
             {
                 var flat = BrepFlattener.Flatten(breps[i], doc);
@@ -151,6 +169,7 @@ namespace SeaNest.Commands
                 {
                     polygons.Add(flat.Outer);
                     innerLoopsPerPart.Add(flat.InnerLoops);
+                    namesPerPart.Add(brepNames[i]);
                 }
             }
 
@@ -229,7 +248,7 @@ namespace SeaNest.Commands
                 return Rhino.Commands.Result.Nothing;
             }
 
-            DrawNestingResult(doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric, innerLoopsPerPart);
+            DrawNestingResult(doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric, innerLoopsPerPart, namesPerPart);
 
             int mirrored = response.Placements.Count(p => p.IsMirrored);
             string mirrorNote = mirrored > 0 ? $", {mirrored} mirrored" : "";
@@ -256,8 +275,16 @@ namespace SeaNest.Commands
             NestResponse response,
             double sheetW, double sheetH, double sheetT,
             double margin, double inToModel, bool isMetric,
-            IReadOnlyList<IReadOnlyList<Curve>> innerLoopsPerPart = null)
+            IReadOnlyList<IReadOnlyList<Curve>> innerLoopsPerPart = null,
+            IReadOnlyList<string> namesPerPart = null)
         {
+            // Phase 8: SLF-RHN Architect font lookup, plus a one-per-command
+            // warning if the font isn't available (Rhino bundles it, but a
+            // misconfigured install could miss it). Defensive: fall through
+            // to dim-style default so labels still emit.
+            var partLabelFont = Rhino.DocObjects.Font.FromQuartetProperties(PartLabelFontFace, false, false);
+            bool partLabelFontMissingWarned = false;
+
             int layerNestedIdx = EnsureLayer(doc, LayerNested, System.Drawing.Color.Black);
             int layerSheetsIdx = EnsureLayer(doc, LayerSheets, System.Drawing.Color.Black);
             int layerLabelsIdx = EnsureLayer(doc, LayerLabels, System.Drawing.Color.Magenta);
@@ -329,6 +356,50 @@ namespace SeaNest.Commands
                             var transformed = PolygonToCurve.ToCurveFromOriginal(loop, pp, yOffset);
                             var loopId = doc.Objects.AddCurve(transformed, partAttrs);
                             if (loopId != Guid.Empty) createdObjectIds.Add(loopId);
+                        }
+                    }
+                }
+
+                // Phase 8: object-name label at the placed-polygon centroid,
+                // rotated to match the part's RotationDeg. Position uses
+                // pp.PlacedPolygon.Centroid directly — the engine already
+                // applied mirror/rotate/translate, so no transform math here
+                // and no risk of mirror-axis bugs. Rotation is pure
+                // (no mirror flip on the glyph) so text stays readable on
+                // mirrored placements. Skipped when the source object has
+                // no Name attribute.
+                if (namesPerPart != null && pp.OriginalIndex < namesPerPart.Count)
+                {
+                    string name = namesPerPart[pp.OriginalIndex];
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        var c = pp.PlacedPolygon.Centroid;
+                        var labelOrigin = new Point3d(c.X, c.Y + yOffset, 0);
+                        var labelPartPlane = new Plane(labelOrigin, Vector3d.ZAxis);
+                        double rotRad = pp.RotationDeg * Math.PI / 180.0;
+                        labelPartPlane.Rotate(rotRad, Vector3d.ZAxis);
+
+                        var partLabel = TextEntity.Create(name, labelPartPlane, dimStyle, false, 0, 0);
+                        if (partLabel != null)
+                        {
+                            partLabel.TextHeight = PartLabelHeightIn * inToModel;
+                            partLabel.DimensionScale = PartLabelScale;
+                            partLabel.Justification = TextJustification.MiddleCenter;
+                            if (partLabelFont != null)
+                            {
+                                partLabel.Font = partLabelFont;
+                            }
+                            else if (!partLabelFontMissingWarned)
+                            {
+                                RhinoApp.WriteLine(
+                                    $"Warning: '{PartLabelFontFace}' font not available; " +
+                                    "part labels will use the default font.");
+                                partLabelFontMissingWarned = true;
+                            }
+
+                            var partLabelAttrs = new ObjectAttributes { LayerIndex = layerLabelsIdx };
+                            var partLabelId = doc.Objects.AddText(partLabel, partLabelAttrs);
+                            if (partLabelId != Guid.Empty) createdObjectIds.Add(partLabelId);
                         }
                     }
                 }
