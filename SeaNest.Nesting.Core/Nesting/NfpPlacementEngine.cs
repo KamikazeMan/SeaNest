@@ -325,8 +325,10 @@ namespace SeaNest.Nesting.Core.Nesting
             var sourcePoly = _request.Polygons[partIndex];
             var srcBBox = sourcePoly.BoundingBox;
 
-            var rotatedSource = sourcePoly.RotateAround(Point2D.Origin, rotRad);
-            var rotBBox = rotatedSource.BoundingBox;
+            // Use normalized (bbox-at-origin) source for the post-rotation bbox computation.
+            // Mismatch with BLF here was a latent bug — surfaced when Phase 7b began rendering inner loops via Transform.
+            var rotatedNormalized = sourcePoly.MoveToOrigin().RotateAround(Point2D.Origin, rotRad);
+            var rotBBox = rotatedNormalized.BoundingBox;
 
             var step1 = Transform2D.Translation(-srcBBox.MinX, -srcBBox.MinY);
             var step2 = Transform2D.RotationDegrees(best.Orientation.RotationDeg);
