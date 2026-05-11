@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using Rhino;   // Phase 7c.3.2.2 (TEMPORARY): for unconditional RhinoApp.WriteLine in Build.
 using SeaNest.Nesting.Core.Geometry;
 
 namespace SeaNest.Nesting.Core.Nesting
@@ -108,6 +109,16 @@ namespace SeaNest.Nesting.Core.Nesting
             bool isMirrored)
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
+
+            // Phase 7c.3.2.2 (TEMPORARY): unconditional entry log that bypasses
+            // any static-delegate wiring. Proves whether Build is reached at all
+            // for these orientations, independent of OrientedPart.DiagnosticLog
+            // or Polygon.DiagnosticLog. Revert with the rest of the diagnostic
+            // logging in 7c.4 and drop the RhinoCommon reference from the csproj.
+            RhinoApp.WriteLine(
+                $"OrientedPart.Build ENTRY: sourcePartIndex={sourcePartIndex} " +
+                $"orientationIndex={orientationIndex} isMirrored={isMirrored} " +
+                $"rotationDeg={rotationDeg:F1}");
 
             Polygon working = source;
             if (isMirrored)

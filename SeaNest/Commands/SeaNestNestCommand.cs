@@ -160,6 +160,14 @@ namespace SeaNest.Commands
                 }
                 else
                 {
+                    // Phase 7c.3.2.2 (TEMPORARY): show what BrepFlattener actually
+                    // returns to the orchestrator, before any engine ingestion.
+                    var ob = flat.Outer.BoundingBox;
+                    RhinoApp.WriteLine(
+                        $"BrepFlattener output: part={i} " +
+                        $"outerBBox.MinX={ob.MinX:F3} outerBBox.MaxX={ob.MaxX:F3} " +
+                        $"outerBBox.MinY={ob.MinY:F3} outerBBox.MaxY={ob.MaxY:F3}");
+
                     polygons.Add(flat.Outer);
                     innerLoopsPerPart.Add(flat.InnerLoops);
                 }

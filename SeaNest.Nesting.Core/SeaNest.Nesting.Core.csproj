@@ -6,6 +6,12 @@
 
   <ItemGroup>
     <PackageReference Include="Clipper2" Version="2.0.0" />
+    <!-- Phase 7c.3.2.2 (TEMPORARY): RhinoCommon reference for diagnostic
+         RhinoApp.WriteLine inside OrientedPart.Build to bypass static-log
+         wiring concerns. ExcludeAssets="runtime" pulls only the compile-time
+         assemblies so the runtime contract on the plugin side is unchanged.
+         REMOVE in 7c.4 along with the diagnostic itself. -->
+    <PackageReference Include="RhinoCommon" Version="8.0.23304.9001" ExcludeAssets="runtime" />
   </ItemGroup>
 
 </Project>
