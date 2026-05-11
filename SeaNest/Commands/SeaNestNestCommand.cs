@@ -142,6 +142,9 @@ namespace SeaNest.Commands
             var innerLoopsPerPart = new List<IReadOnlyList<Curve>>();
             for (int i = 0; i < breps.Count; i++)
             {
+                // Phase 7c.1 (TEMPORARY): tag the flatten-diagnostic log lines
+                // emitted by BrepFlattener with the user-visible part index.
+                BrepFlattener.DiagnosticPartIndex = i;
                 var flat = BrepFlattener.Flatten(breps[i], doc);
                 if (flat == null)
                 {
