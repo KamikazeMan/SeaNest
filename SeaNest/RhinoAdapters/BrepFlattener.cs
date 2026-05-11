@@ -457,12 +457,15 @@ namespace SeaNest.RhinoAdapters
             if (curve is PolyCurve polyCurve)
             {
                 var segments = polyCurve.Explode();
+                Curve coalesced = null;
+                int joinedLength = -1;
                 if (segments != null && segments.Length > 0)
                 {
                     var joined = Curve.JoinCurves(segments, modelTol);
+                    joinedLength = joined?.Length ?? 0;
                     if (joined != null && joined.Length == 1)
                     {
-                        var coalesced = joined[0];
+                        coalesced = joined[0];
                         if (coalesced.TryGetCircle(out Circle pcCircle, modelTol))
                         {
                             var arcCurve = new ArcCurve(pcCircle);
@@ -477,6 +480,27 @@ namespace SeaNest.RhinoAdapters
                         }
                     }
                 }
+
+                // Phase 7c.5.1 (TEMPORARY): coalesce didn't yield circle/arc.
+                // Surface segment/join counts, the coalesced curve's type and
+                // closedness/length, and TryGetCircle/Arc outcomes at multiple
+                // tolerances so we can distinguish "join split the result" from
+                // "joined but not closed" from "closed but tolerance too tight".
+                int segCount = segments?.Length ?? 0;
+                string typeName = coalesced != null ? coalesced.GetType().Name : "(no joined[0])";
+                bool isClosed = coalesced != null && coalesced.IsClosed;
+                double length = coalesced != null ? coalesced.GetLength() : 0.0;
+                bool c1 = coalesced != null && coalesced.TryGetCircle(out _, modelTol);
+                bool c10 = coalesced != null && coalesced.TryGetCircle(out _, modelTol * 10.0);
+                bool c5 = coalesced != null && coalesced.TryGetCircle(out _, 0.05);
+                bool a1 = coalesced != null && coalesced.TryGetArc(out _, modelTol);
+                bool a10 = coalesced != null && coalesced.TryGetArc(out _, modelTol * 10.0);
+                Rhino.RhinoApp.WriteLine(
+                    $"PolyCurve coalesce: segments.Length={segCount}, joined.Length={joinedLength}, " +
+                    $"joined[0].type={typeName}, joined[0].IsClosed={isClosed}, " +
+                    $"joined[0].GetLength()={length:F3}, " +
+                    $"TryGetCircle(modelTol)={c1}, TryGetCircle(10*modelTol)={c10}, TryGetCircle(0.05)={c5}, " +
+                    $"TryGetArc(modelTol)={a1}, TryGetArc(10*modelTol)={a10}");
             }
 
             // Probe for native shapes BEFORE the rigid transform: BrepLoop.To3dCurve()
