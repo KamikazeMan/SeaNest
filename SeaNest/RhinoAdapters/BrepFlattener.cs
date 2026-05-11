@@ -479,6 +479,22 @@ namespace SeaNest.RhinoAdapters
 
             var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
 
+            // Phase 7b.3.1 (TEMPORARY): per-call diagnostic for circle/arc detection.
+            // Reports runtime type, the modelTol passed in, and TryGetCircle/TryGetArc
+            // outcomes at strict / 10× / 0.01" tolerances so we can tell whether the
+            // probes are failing at strict tolerance, failing at all tolerances, or
+            // not being reached at all. Revert after one diagnostic run.
+            bool circleStrict = curve.TryGetCircle(out _, modelTol);
+            bool circleLoose  = curve.TryGetCircle(out _, modelTol * 10.0);
+            bool circleSlop   = curve.TryGetCircle(out _, 0.01);
+            bool arcStrict    = curve.TryGetArc(out _, modelTol);
+            bool arcLoose     = curve.TryGetArc(out _, modelTol * 10.0);
+            bool arcSlop      = curve.TryGetArc(out _, 0.01);
+            RhinoApp.WriteLine(
+                $"ProjectCurveToPlaneSpace: type={curve.GetType().Name} modelTol={modelTol:G3} | " +
+                $"TryGetCircle(tol)={circleStrict} TryGetCircle(10*tol)={circleLoose} TryGetCircle(0.01)={circleSlop} | " +
+                $"TryGetArc(tol)={arcStrict} TryGetArc(10*tol)={arcLoose} TryGetArc(0.01)={arcSlop}");
+
             // Probe for native shapes BEFORE the rigid transform: BrepLoop.To3dCurve()
             // hands back NURBS spans even when the trim is geometrically a perfect
             // circle or arc, so a direct DuplicateCurve preserves the NURBS form
