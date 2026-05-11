@@ -466,6 +466,23 @@ namespace SeaNest.RhinoAdapters
                     if (joined != null && joined.Length == 1)
                     {
                         coalesced = joined[0];
+
+                        // Phase 7c.5.2: if the joined result is still a PolyCurve,
+                        // convert to a single multi-span NurbsCurve. JoinCurves on
+                        // two NURBS half-circles returns the result as a closed
+                        // PolyCurve, and TryGetCircle on a PolyCurve suffers the
+                        // same segment-aggregation limitation that drove 7c.5 in
+                        // the first place. ToNurbsCurve consolidates the
+                        // polycurve's segments into one parametric curve whose
+                        // evaluated geometry TryGetCircle/TryGetArc can probe
+                        // directly. Standard Rhino idiom. Skip when joined[0] is
+                        // already a NurbsCurve / ArcCurve — no conversion needed.
+                        if (coalesced is PolyCurve)
+                        {
+                            var nurbsForm = coalesced.ToNurbsCurve();
+                            if (nurbsForm != null) coalesced = nurbsForm;
+                        }
+
                         if (coalesced.TryGetCircle(out Circle pcCircle, modelTol))
                         {
                             var arcCurve = new ArcCurve(pcCircle);
