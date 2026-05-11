@@ -118,29 +118,52 @@ namespace SeaNest.RhinoAdapters
             if (working == null)
                 throw new InvalidOperationException("Failed to duplicate original curve.");
 
-            // Step 1: Mirror, if the placement is mirrored. The mirror axis is the
-            // line x=0 in the source polygon's own coordinate frame, matching
-            // Polygon.Mirror's X-flip (x → -x). The engine's canonical polygon
-            // (and thus Transform) was built from a polygon that had this exact
-            // flip applied, so applying the same flip here reproduces the
-            // engine's geometry. Phase 7c.3.3 fix — earlier attempts using the
-            // curve's own bbox-min (pre-7c.3.1) or the part's source bbox-min
-            // (7c.3.1) were both wrong; Polygon.Mirror flips about x=0
-            // regardless of where the polygon sits in its source frame.
+            // Step 1: Mirror, if the placement is mirrored. The mirror axis is
+            // the source bbox CENTER X — (placement.SourceBBoxMinX +
+            // placement.SourceBBoxMaxX) * 0.5. Why center, not 0:
+            //
+            //   OrientedPart.Build does Polygon.Mirror (X-flip about x=0)
+            //   followed by MoveToOrigin, which shifts by -M(source).BBox.Min
+            //   = (+srcMax, …). The engine's PlacementResult.Transform was
+            //   built from the un-mirrored source and has no awareness of
+            //   that +srcMax shift. For Transform(mirror_step(P)) to
+            //   reproduce engine_mirrored(P), the renderer-side mirror must
+            //   pre-compensate: mirroring about (srcMin+srcMax)/2 shifts
+            //   every point by exactly (srcMin + srcMax), which equals
+            //   +srcMax (the engine's missing MoveToOrigin correction) plus
+            //   -srcMin (which Transform.step1 was already going to apply).
+            //
+            // The bbox-center derivation is provably correct for any rotation
+            // θ because the algebra reduces to A - B + C = 0 with
+            // A = (srcMax, -srcMin.Y), B = source.MoveToOrigin().BBox.Min = 0,
+            // C = M(source).BBox.Min = (-srcMax, srcMin.Y); since A + C = 0 = B,
+            // R_θ(A) - R_θ(B) + R_θ(C) = R_θ(0) = 0. See Phase 7c.3.4 audit
+            // for the full walkthrough.
+            //
+            // Prior attempts and why they were wrong:
+            //   pre-7c.3.1: curve's own bbox.Min.X — off by random per-curve;
+            //               outer happened to coincide with the part's bbox-min.
+            //   7c.3.1:     source bbox.Min.X — off by full source width.
+            //   7c.3.3:     x=0 — off by source center × 2.
+            //   7c.3.4:     source bbox center X — correct for all rotations.
             //
             // Rhino's Transform.Mirror takes a plane; we want a vertical plane
-            // through (0, 0, 0) with normal = +X.
+            // through (mirrorX, 0, 0) with normal = +X.
             if (placement.IsMirrored)
             {
+                double mirrorX = (placement.SourceBBoxMinX + placement.SourceBBoxMaxX) * 0.5;
+
                 // Phase 7c.3.2 (TEMPORARY): keep the curve-bbox comparison
-                // visible so we can confirm the new x=0 axis is the right one
-                // for both outer and inner curves at runtime.
+                // visible so we can confirm the bbox-center axis lands inner
+                // curves at the expected positions for both outer and inner
+                // curves at runtime.
                 var curveBboxForDiag = working.GetBoundingBox(true);
                 double curveBboxMinX = curveBboxForDiag.Min.X;
-                double mirrorX = 0.0;
                 double delta = mirrorX - curveBboxMinX;
                 Rhino.RhinoApp.WriteLine(
                     $"ToCurveFromOriginal mirror: mirrorX={mirrorX:F3} " +
+                    $"(SourceBBoxMinX={placement.SourceBBoxMinX:F3} " +
+                    $"SourceBBoxMaxX={placement.SourceBBoxMaxX:F3}) " +
                     $"curveBbox.Min.X={curveBboxMinX:F3} (delta={delta:F3})");
 
                 var mirrorPlane = new Plane(

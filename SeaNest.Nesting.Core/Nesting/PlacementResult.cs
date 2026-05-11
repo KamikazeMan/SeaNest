@@ -66,6 +66,36 @@ namespace SeaNest.Nesting.Core.Nesting
         public bool IsMirrored { get; }
 
         /// <summary>
+        /// X coordinates of the source polygon's bounding-box minimum and
+        /// maximum, in the pre-orientation (un-rotated, un-mirrored) source
+        /// frame. Carried alongside the placement so that draw-time mirror
+        /// operations on ride-along curves (e.g. Phase 7b inner-loop cut
+        /// paths) can pivot about the source bbox CENTER X
+        /// (<c>(SourceBBoxMinX + SourceBBoxMaxX) * 0.5</c>).
+        ///
+        /// Why center, not min: <see cref="OrientedPart.Build"/> applies
+        /// <see cref="Polygon.Mirror"/> (X-flip about x=0) and then
+        /// <see cref="Polygon.MoveToOrigin"/> (shift by
+        /// <c>-M(source).BBox.Min = (+srcMax, …)</c>). The engine's
+        /// <see cref="Transform"/> was built from the un-mirrored source and
+        /// has no awareness of this <c>+srcMax</c> shift. For
+        /// <c>Transform(mirror_step(P))</c> to reproduce
+        /// <c>engine_mirrored(P)</c>, the renderer-side mirror must
+        /// pre-compensate — mirroring about <c>(srcMin+srcMax)/2</c> shifts
+        /// every point by exactly <c>srcMin + srcMax</c>, which equals the
+        /// missing <c>+srcMax</c> plus the <c>-srcMin</c> that
+        /// <see cref="Transform"/>'s step1 was already going to apply. Phase
+        /// 7c.3.4 derivation; algebra holds for arbitrary rotation θ.
+        ///
+        /// Only X coordinates are exposed because <see cref="Polygon.Mirror"/>
+        /// is an X-flip; the mirror plane is vertical and Y is indifferent.
+        /// </summary>
+        public double SourceBBoxMinX { get; }
+
+        /// <inheritdoc cref="SourceBBoxMinX"/>
+        public double SourceBBoxMaxX { get; }
+
+        /// <summary>
         /// The placed 2D polygon: original outline rotated, mirrored (if applicable), and
         /// translated to its final position on the sheet. Already in sheet-local coordinates;
         /// the only further transform needed at draw time is the per-sheet Y offset for
@@ -82,6 +112,8 @@ namespace SeaNest.Nesting.Core.Nesting
             Transform2D transform,
             double rotationDeg,
             bool isMirrored,
+            double sourceBBoxMinX,
+            double sourceBBoxMaxX,
             Polygon placedPolygon)
         {
             if (originalIndex < 0)
@@ -96,6 +128,8 @@ namespace SeaNest.Nesting.Core.Nesting
             Transform = transform;
             RotationDeg = rotationDeg;
             IsMirrored = isMirrored;
+            SourceBBoxMinX = sourceBBoxMinX;
+            SourceBBoxMaxX = sourceBBoxMaxX;
             PlacedPolygon = placedPolygon;
         }
 
@@ -108,8 +142,10 @@ namespace SeaNest.Nesting.Core.Nesting
             int sheet,
             Transform2D transform,
             double rotationDeg,
+            double sourceBBoxMinX,
+            double sourceBBoxMaxX,
             Polygon placedPolygon)
-            : this(originalIndex, sheet, transform, rotationDeg, isMirrored: false, placedPolygon)
+            : this(originalIndex, sheet, transform, rotationDeg, isMirrored: false, sourceBBoxMinX, sourceBBoxMaxX, placedPolygon)
         {
         }
 

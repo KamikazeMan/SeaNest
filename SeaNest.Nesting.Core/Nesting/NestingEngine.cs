@@ -439,13 +439,18 @@ namespace SeaNest.Nesting.Core.Nesting
                 sheetIdx,
                 combined,
                 best.RotationDeg,
+                origBBox.MinX,
+                origBBox.MaxX,
                 finalPolygon));
 
             // Phase 7c.3.2.1 (TEMPORARY): readback from the just-constructed object.
             var ppJustAdded = placements[placements.Count - 1];
             DiagnosticCallback?.Invoke(
                 $"PlacementResult constructed: part={ppJustAdded.OriginalIndex} " +
-                $"IsMirrored={ppJustAdded.IsMirrored}");
+                $"IsMirrored={ppJustAdded.IsMirrored} " +
+                $"SourceBBoxMinX={ppJustAdded.SourceBBoxMinX:F3} " +
+                $"SourceBBoxMaxX={ppJustAdded.SourceBBoxMaxX:F3} " +
+                $"centerX={(ppJustAdded.SourceBBoxMinX + ppJustAdded.SourceBBoxMaxX) * 0.5:F3}");
 
             sheet.Placed.Add(finalPolygon);
             var inflated = PolygonInflate.Inflate(finalPolygon, request.Spacing);
