@@ -129,6 +129,17 @@ namespace SeaNest.RhinoAdapters
             // (SourceBBoxMinX, 0, 0) with normal = +X.
             if (placement.IsMirrored)
             {
+                // Phase 7c.3.2 (TEMPORARY): verify SourceBBoxMinX is being read
+                // with the expected value, and compare against the curve's own
+                // bbox-min X (what the pre-7c.3.1 buggy code would have used).
+                var curveBboxForDiag = working.GetBoundingBox(true);
+                double curveBboxMinX = curveBboxForDiag.Min.X;
+                double mirrorX = placement.SourceBBoxMinX;
+                double delta = mirrorX - curveBboxMinX;
+                Rhino.RhinoApp.WriteLine(
+                    $"ToCurveFromOriginal mirror: placement.SourceBBoxMinX={mirrorX:F3} " +
+                    $"curveBbox.Min.X={curveBboxMinX:F3} (delta={delta:F3})");
+
                 var mirrorPlane = new Plane(
                     new Point3d(placement.SourceBBoxMinX, 0, 0),
                     Vector3d.XAxis);
