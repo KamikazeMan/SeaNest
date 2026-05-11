@@ -27,6 +27,15 @@ namespace SeaNest.Nesting.Core.Nesting
     public sealed class OrientedPart
     {
         /// <summary>
+        /// Phase 7c.3.2.1 (TEMPORARY): static diagnostic sink for verifying the
+        /// mirror codepath is reached during BuildAll, independent of
+        /// <see cref="Polygon.DiagnosticLog"/> — comparing the two reveals
+        /// assembly-identity mismatches on the Polygon type. Wired by the
+        /// command layer. Revert when 7c.3.x closes.
+        /// </summary>
+        public static Action<string> DiagnosticLog { get; set; }
+
+        /// <summary>
         /// Unique identifier for this orientation across all parts in the job.
         /// Used as half of the NFP cache key.
         /// </summary>
@@ -102,7 +111,17 @@ namespace SeaNest.Nesting.Core.Nesting
 
             Polygon working = source;
             if (isMirrored)
+            {
+                // Phase 7c.3.2.1 (TEMPORARY): confirm this codepath is reached
+                // for mirrored orientations, and surface both static-log states
+                // so we can tell whether Polygon.DiagnosticLog is null from
+                // OrientedPart's perspective (assembly-identity mismatch) or
+                // from the command's perspective (wiring miss).
+                DiagnosticLog?.Invoke(
+                    $"OrientedPart.Build: src={sourcePartIndex} ori={orientationIndex} rot={rotationDeg:F1} " +
+                    $"about-to-mirror — Polygon.DiagnosticLog.is-null={Polygon.DiagnosticLog == null}");
                 working = working.Mirror();   // X-flip + winding reversal in one pass
+            }
 
             double radians = rotationDeg * Math.PI / 180.0;
             if (radians != 0.0)

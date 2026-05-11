@@ -356,6 +356,12 @@ namespace SeaNest.Nesting.Core.Nesting
             var step4 = Transform2D.Translation(best.X, best.Y);
             var combined = step1.Then(step2).Then(step3).Then(step4);
 
+            // Phase 7c.3.2.1 (TEMPORARY): verify what's being passed into PlacementResult.
+            DiagnosticLog?.Invoke(
+                $"NfpPlacementEngine PlacementResult inputs: part={partIndex} " +
+                $"sourcePoly.BoundingBox.MinX={sourcePoly.BoundingBox.MinX:F3} " +
+                $"srcBBox.MinX={srcBBox.MinX:F3}");
+
             placements.Add(new PlacementResult(
                 originalIndex: partIndex,
                 sheet: sheetIdx,
@@ -364,6 +370,13 @@ namespace SeaNest.Nesting.Core.Nesting
                 isMirrored: best.Orientation.IsMirrored,
                 sourceBBoxMinX: srcBBox.MinX,
                 placedPolygon: placedPolygon));
+
+            // Phase 7c.3.2.1 (TEMPORARY): readback from the just-constructed object.
+            var ppJustAdded = placements[placements.Count - 1];
+            DiagnosticLog?.Invoke(
+                $"PlacementResult constructed: part={ppJustAdded.OriginalIndex} " +
+                $"SourceBBoxMinX={ppJustAdded.SourceBBoxMinX:F3} " +
+                $"IsMirrored={ppJustAdded.IsMirrored}");
 
             var newPlaced = new PlacedItem(best.Orientation, best.X, best.Y);
             sheet.Placed.Add(newPlaced);

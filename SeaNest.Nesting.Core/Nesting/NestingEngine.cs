@@ -428,6 +428,12 @@ namespace SeaNest.Nesting.Core.Nesting
             var step4 = Transform2D.Translation(best.X, best.Y);
             var combined = step1.Then(step2).Then(step3).Then(step4);
 
+            // Phase 7c.3.2.1 (TEMPORARY): verify what's being passed into PlacementResult.
+            DiagnosticCallback?.Invoke(
+                $"NestingEngine.BLF PlacementResult inputs: part={part.OriginalIndex} " +
+                $"request.Polygons[part].BoundingBox.MinX={request.Polygons[part.OriginalIndex].BoundingBox.MinX:F3} " +
+                $"origBBox.MinX={origBBox.MinX:F3}");
+
             placements.Add(new PlacementResult(
                 part.OriginalIndex,
                 sheetIdx,
@@ -435,6 +441,13 @@ namespace SeaNest.Nesting.Core.Nesting
                 best.RotationDeg,
                 origBBox.MinX,
                 finalPolygon));
+
+            // Phase 7c.3.2.1 (TEMPORARY): readback from the just-constructed object.
+            var ppJustAdded = placements[placements.Count - 1];
+            DiagnosticCallback?.Invoke(
+                $"PlacementResult constructed: part={ppJustAdded.OriginalIndex} " +
+                $"SourceBBoxMinX={ppJustAdded.SourceBBoxMinX:F3} " +
+                $"IsMirrored={ppJustAdded.IsMirrored}");
 
             sheet.Placed.Add(finalPolygon);
             var inflated = PolygonInflate.Inflate(finalPolygon, request.Spacing);

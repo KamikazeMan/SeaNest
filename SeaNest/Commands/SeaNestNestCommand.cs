@@ -139,6 +139,11 @@ namespace SeaNest.Commands
             // Phase 7c.3.2 (TEMPORARY): wire Polygon.Mirror's diagnostic sink.
             Polygon.DiagnosticLog = msg => RhinoApp.WriteLine(msg);
 
+            // Phase 7c.3.2.1 (TEMPORARY): independent sink at OrientedPart.Build
+            // for verifying the mirror codepath and detecting Polygon-type
+            // assembly-identity mismatches.
+            OrientedPart.DiagnosticLog = msg => RhinoApp.WriteLine(msg);
+
             var polygons = new List<Polygon>();
             // Phase 7b: parallel per-part inner-loop table indexed by polygons[i].
             // Bypasses the nesting engine entirely; consumed only at draw time.
