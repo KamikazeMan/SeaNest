@@ -137,35 +137,13 @@ namespace SeaNest.RhinoAdapters
             // θ because the algebra reduces to A - B + C = 0 with
             // A = (srcMax, -srcMin.Y), B = source.MoveToOrigin().BBox.Min = 0,
             // C = M(source).BBox.Min = (-srcMax, srcMin.Y); since A + C = 0 = B,
-            // R_θ(A) - R_θ(B) + R_θ(C) = R_θ(0) = 0. See Phase 7c.3.4 audit
-            // for the full walkthrough.
-            //
-            // Prior attempts and why they were wrong:
-            //   pre-7c.3.1: curve's own bbox.Min.X — off by random per-curve;
-            //               outer happened to coincide with the part's bbox-min.
-            //   7c.3.1:     source bbox.Min.X — off by full source width.
-            //   7c.3.3:     x=0 — off by source center × 2.
-            //   7c.3.4:     source bbox center X — correct for all rotations.
+            // R_θ(A) - R_θ(B) + R_θ(C) = R_θ(0) = 0.
             //
             // Rhino's Transform.Mirror takes a plane; we want a vertical plane
             // through (mirrorX, 0, 0) with normal = +X.
             if (placement.IsMirrored)
             {
                 double mirrorX = (placement.SourceBBoxMinX + placement.SourceBBoxMaxX) * 0.5;
-
-                // Phase 7c.3.2 (TEMPORARY): keep the curve-bbox comparison
-                // visible so we can confirm the bbox-center axis lands inner
-                // curves at the expected positions for both outer and inner
-                // curves at runtime.
-                var curveBboxForDiag = working.GetBoundingBox(true);
-                double curveBboxMinX = curveBboxForDiag.Min.X;
-                double delta = mirrorX - curveBboxMinX;
-                Rhino.RhinoApp.WriteLine(
-                    $"ToCurveFromOriginal mirror: mirrorX={mirrorX:F3} " +
-                    $"(SourceBBoxMinX={placement.SourceBBoxMinX:F3} " +
-                    $"SourceBBoxMaxX={placement.SourceBBoxMaxX:F3}) " +
-                    $"curveBbox.Min.X={curveBboxMinX:F3} (delta={delta:F3})");
-
                 var mirrorPlane = new Plane(
                     new Point3d(mirrorX, 0, 0),
                     Vector3d.XAxis);

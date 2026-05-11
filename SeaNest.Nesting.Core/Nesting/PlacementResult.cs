@@ -84,8 +84,8 @@ namespace SeaNest.Nesting.Core.Nesting
         /// pre-compensate — mirroring about <c>(srcMin+srcMax)/2</c> shifts
         /// every point by exactly <c>srcMin + srcMax</c>, which equals the
         /// missing <c>+srcMax</c> plus the <c>-srcMin</c> that
-        /// <see cref="Transform"/>'s step1 was already going to apply. Phase
-        /// 7c.3.4 derivation; algebra holds for arbitrary rotation θ.
+        /// <see cref="Transform"/>'s step1 was already going to apply.
+        /// Derivation algebra holds for arbitrary rotation θ.
         ///
         /// Only X coordinates are exposed because <see cref="Polygon.Mirror"/>
         /// is an X-flip; the mirror plane is vertical and Y is indifferent.

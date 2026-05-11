@@ -69,20 +69,6 @@ namespace SeaNest.RhinoAdapters
         /// </summary>
         public static Action<string> SimplifyWarning { get; set; }
 
-        /// <summary>
-        /// Phase 7c.1 (TEMPORARY): part-index tag for the per-flatten diagnostic
-        /// output emitted by <see cref="FlattenRaw"/> and
-        /// <see cref="FlatBrepToPolygonOnPlane"/>. Set by the command layer
-        /// immediately before each <see cref="Flatten"/> call so the log lines
-        /// correlate with the user's part numbering.
-        ///
-        /// Static mutable state — acceptable here because flatten is invoked
-        /// serially during command execution (same single-threaded constraint
-        /// that makes <see cref="SquishWarning"/> / <see cref="SimplifyWarning"/>
-        /// acceptable). NOT to be carried over to production once 7c.1 is reverted.
-        /// </summary>
-        public static int DiagnosticPartIndex { get; set; } = -1;
-
         public static BrepFlattenResult Flatten(Brep brep, RhinoDoc doc)
         {
             var raw = FlattenRaw(brep, doc, out var innerLoops);
@@ -122,34 +108,14 @@ namespace SeaNest.RhinoAdapters
             double discretizeTol = modelTol * DiscretizationToleranceFactor;
             double angleTolRad = RhinoMath.ToRadians(UnrollAngleToleranceDegrees);
 
-            // Phase 7c.1 (TEMPORARY): per-flatten face inventory for the diagnostic
-            // step-outcome log lines emitted below.
-            int faceCount = brep.Faces.Count;
-            int planarFaceCount = 0;
-            foreach (var f in brep.Faces)
-                if (f.IsPlanar(modelTol)) planarFaceCount++;
-
             // Step 1: Thickened plate — largest coplanar face region.
             var plateFace = FindLargestPlanarFace(brep, modelTol);
             if (plateFace != null)
             {
                 var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, innerLoops);
-                if (poly != null)
-                {
-                    // Phase 7c.1 (TEMPORARY)
-                    RhinoApp.WriteLine(
-                        $"BrepFlattener Step1: part index {DiagnosticPartIndex}, " +
-                        $"face count={faceCount}, planar faces={planarFaceCount}, " +
-                        $"plateFace=found, outer loop found=true");
-                    return poly;
-                }
+                if (poly != null) return poly;
                 innerLoops.Clear();
             }
-            // Phase 7c.1 (TEMPORARY): Step 1 fall-through.
-            RhinoApp.WriteLine(
-                $"BrepFlattener Step1: part index {DiagnosticPartIndex}, " +
-                $"face count={faceCount}, planar faces={planarFaceCount}, " +
-                $"plateFace={(plateFace != null ? "found" : "null")}, outer loop found=false (fell through)");
 
             // Step 2: Fully flat open Brep.
             if (IsFullyPlanar(brep, modelTol))
@@ -157,7 +123,7 @@ namespace SeaNest.RhinoAdapters
                 Plane plane;
                 if (TryGetBrepPlane(brep, modelTol, out plane))
                 {
-                    var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, modelTol, "Step2", innerLoops);
+                    var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, modelTol, innerLoops);
                     if (poly != null) return poly;
                     innerLoops.Clear();
                 }
@@ -168,7 +134,7 @@ namespace SeaNest.RhinoAdapters
             var unrolled = Unroll(brep, unrollTol, angleTolRad);
             if (unrolled != null)
             {
-                var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, modelTol, "Step3", innerLoops);
+                var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, modelTol, innerLoops);
                 if (poly != null) return poly;
                 innerLoops.Clear();
             }
@@ -289,7 +255,7 @@ namespace SeaNest.RhinoAdapters
 
         private static Polygon FlatBrepToPolygonOnPlane(
             Brep flatBrep, Plane plane, double joinTol, double discretizeTol, double angleTolRad,
-            double modelTol, string diagStep, List<Curve> innerLoopsOut)
+            double modelTol, List<Curve> innerLoopsOut)
         {
             var nakedEdges = new List<Curve>();
             foreach (var edge in flatBrep.Edges)
@@ -315,32 +281,6 @@ namespace SeaNest.RhinoAdapters
                 var amp = AreaMassProperties.Compute(loop);
                 double area = amp?.Area ?? 0;
                 if (area > outerArea) { outer = loop; outerArea = area; }
-            }
-
-            // Phase 7c.1 (TEMPORARY): inventory of JoinCurves output. Logs every
-            // curve with its closed flag and either enclosed area (closed) or
-            // arc length (open, via Curve.GetLength()). Open-curve length is the
-            // key diagnostic for "real outer failed IsClosed" cases.
-            int closedCount = closedLoops.Count;
-            int openCount = joined.Length - closedCount;
-            RhinoApp.WriteLine(
-                $"BrepFlattener {diagStep}: part index {DiagnosticPartIndex}, " +
-                $"JoinCurves produced {joined.Length} curves ({closedCount} closed, {openCount} open):");
-            for (int i = 0; i < joined.Length; i++)
-            {
-                var loop = joined[i];
-                if (loop.IsClosed)
-                {
-                    var amp = AreaMassProperties.Compute(loop);
-                    double area = amp?.Area ?? 0;
-                    string selected = ReferenceEquals(loop, outer) ? "  (selected as outer)" : "";
-                    RhinoApp.WriteLine($"  loop[{i}] closed=true  area={area:F3}{selected}");
-                }
-                else
-                {
-                    double length = loop.GetLength();
-                    RhinoApp.WriteLine($"  loop[{i}] closed=false length={length:F3}");
-                }
             }
 
             if (outer == null) return null;
@@ -501,22 +441,6 @@ namespace SeaNest.RhinoAdapters
             if (curve == null) return null;
 
             var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
-
-            // Phase 7b.3.1 (TEMPORARY): per-call diagnostic for circle/arc detection.
-            // Reports runtime type, the modelTol passed in, and TryGetCircle/TryGetArc
-            // outcomes at strict / 10× / 0.01" tolerances so we can tell whether the
-            // probes are failing at strict tolerance, failing at all tolerances, or
-            // not being reached at all. Revert after one diagnostic run.
-            bool circleStrict = curve.TryGetCircle(out _, modelTol);
-            bool circleLoose  = curve.TryGetCircle(out _, modelTol * 10.0);
-            bool circleSlop   = curve.TryGetCircle(out _, 0.01);
-            bool arcStrict    = curve.TryGetArc(out _, modelTol);
-            bool arcLoose     = curve.TryGetArc(out _, modelTol * 10.0);
-            bool arcSlop      = curve.TryGetArc(out _, 0.01);
-            RhinoApp.WriteLine(
-                $"ProjectCurveToPlaneSpace: type={curve.GetType().Name} modelTol={modelTol:G3} | " +
-                $"TryGetCircle(tol)={circleStrict} TryGetCircle(10*tol)={circleLoose} TryGetCircle(0.01)={circleSlop} | " +
-                $"TryGetArc(tol)={arcStrict} TryGetArc(10*tol)={arcLoose} TryGetArc(0.01)={arcSlop}");
 
             // Probe for native shapes BEFORE the rigid transform: BrepLoop.To3dCurve()
             // hands back NURBS spans even when the trim is geometrically a perfect

@@ -14,15 +14,6 @@ namespace SeaNest.Nesting.Core.Geometry
     /// </summary>
     public sealed class Polygon
     {
-        /// <summary>
-        /// Phase 7c.3.2 (TEMPORARY): static diagnostic sink for confirming the
-        /// axis <see cref="Mirror"/> actually uses at runtime. Wired by the
-        /// command layer to RhinoApp.WriteLine. Same single-threaded constraint
-        /// as <see cref="SeaNest.RhinoAdapters.BrepFlattener.SquishWarning"/>.
-        /// Revert after the 7c.3.x mirror investigation closes.
-        /// </summary>
-        public static Action<string> DiagnosticLog { get; set; }
-
         private readonly Point2D[] _points;
 
         // Cached lazily — null means not yet computed
@@ -242,18 +233,6 @@ namespace SeaNest.Nesting.Core.Geometry
         public Polygon Mirror()
         {
             int n = _points.Length;
-
-            // Phase 7c.3.2 (TEMPORARY): log the actual flip axis at runtime.
-            // Implementation flips x → -x, i.e. mirrors about x=0 in the
-            // polygon's own coordinate frame. The bbox-min/max are reported
-            // so the caller can compare against the axis derivation in
-            // PolygonToCurve.ToCurveFromOriginal.
-            if (DiagnosticLog != null)
-            {
-                var bb = BoundingBox;
-                DiagnosticLog($"Polygon.Mirror: minX={bb.MinX:F3} maxX={bb.MaxX:F3} flip-axis=0.000");
-            }
-
             var newPoints = new Point2D[n];
             // Flip x and reverse order in one pass: newPoints[i] = mirror(_points[n-1-i])
             for (int i = 0; i < n; i++)

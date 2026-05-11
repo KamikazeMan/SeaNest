@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using Rhino;   // Phase 7c.3.2.2 (TEMPORARY): for unconditional RhinoApp.WriteLine in Build.
 using SeaNest.Nesting.Core.Geometry;
 
 namespace SeaNest.Nesting.Core.Nesting
@@ -27,15 +26,6 @@ namespace SeaNest.Nesting.Core.Nesting
     /// </summary>
     public sealed class OrientedPart
     {
-        /// <summary>
-        /// Phase 7c.3.2.1 (TEMPORARY): static diagnostic sink for verifying the
-        /// mirror codepath is reached during BuildAll, independent of
-        /// <see cref="Polygon.DiagnosticLog"/> — comparing the two reveals
-        /// assembly-identity mismatches on the Polygon type. Wired by the
-        /// command layer. Revert when 7c.3.x closes.
-        /// </summary>
-        public static Action<string> DiagnosticLog { get; set; }
-
         /// <summary>
         /// Unique identifier for this orientation across all parts in the job.
         /// Used as half of the NFP cache key.
@@ -110,29 +100,9 @@ namespace SeaNest.Nesting.Core.Nesting
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
 
-            // Phase 7c.3.2.2 (TEMPORARY): unconditional entry log that bypasses
-            // any static-delegate wiring. Proves whether Build is reached at all
-            // for these orientations, independent of OrientedPart.DiagnosticLog
-            // or Polygon.DiagnosticLog. Revert with the rest of the diagnostic
-            // logging in 7c.4 and drop the RhinoCommon reference from the csproj.
-            RhinoApp.WriteLine(
-                $"OrientedPart.Build ENTRY: sourcePartIndex={sourcePartIndex} " +
-                $"orientationIndex={orientationIndex} isMirrored={isMirrored} " +
-                $"rotationDeg={rotationDeg:F1}");
-
             Polygon working = source;
             if (isMirrored)
-            {
-                // Phase 7c.3.2.1 (TEMPORARY): confirm this codepath is reached
-                // for mirrored orientations, and surface both static-log states
-                // so we can tell whether Polygon.DiagnosticLog is null from
-                // OrientedPart's perspective (assembly-identity mismatch) or
-                // from the command's perspective (wiring miss).
-                DiagnosticLog?.Invoke(
-                    $"OrientedPart.Build: src={sourcePartIndex} ori={orientationIndex} rot={rotationDeg:F1} " +
-                    $"about-to-mirror — Polygon.DiagnosticLog.is-null={Polygon.DiagnosticLog == null}");
                 working = working.Mirror();   // X-flip + winding reversal in one pass
-            }
 
             double radians = rotationDeg * Math.PI / 180.0;
             if (radians != 0.0)

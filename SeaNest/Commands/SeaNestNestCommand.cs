@@ -136,23 +136,12 @@ namespace SeaNest.Commands
                 if (msg != null) RhinoApp.WriteLine(msg);
             };
 
-            // Phase 7c.3.2 (TEMPORARY): wire Polygon.Mirror's diagnostic sink.
-            Polygon.DiagnosticLog = msg => RhinoApp.WriteLine(msg);
-
-            // Phase 7c.3.2.1 (TEMPORARY): independent sink at OrientedPart.Build
-            // for verifying the mirror codepath and detecting Polygon-type
-            // assembly-identity mismatches.
-            OrientedPart.DiagnosticLog = msg => RhinoApp.WriteLine(msg);
-
             var polygons = new List<Polygon>();
             // Phase 7b: parallel per-part inner-loop table indexed by polygons[i].
             // Bypasses the nesting engine entirely; consumed only at draw time.
             var innerLoopsPerPart = new List<IReadOnlyList<Curve>>();
             for (int i = 0; i < breps.Count; i++)
             {
-                // Phase 7c.1 (TEMPORARY): tag the flatten-diagnostic log lines
-                // emitted by BrepFlattener with the user-visible part index.
-                BrepFlattener.DiagnosticPartIndex = i;
                 var flat = BrepFlattener.Flatten(breps[i], doc);
                 if (flat == null)
                 {
@@ -160,14 +149,6 @@ namespace SeaNest.Commands
                 }
                 else
                 {
-                    // Phase 7c.3.2.2 (TEMPORARY): show what BrepFlattener actually
-                    // returns to the orchestrator, before any engine ingestion.
-                    var ob = flat.Outer.BoundingBox;
-                    RhinoApp.WriteLine(
-                        $"BrepFlattener output: part={i} " +
-                        $"outerBBox.MinX={ob.MinX:F3} outerBBox.MaxX={ob.MaxX:F3} " +
-                        $"outerBBox.MinY={ob.MinY:F3} outerBBox.MaxY={ob.MaxY:F3}");
-
                     polygons.Add(flat.Outer);
                     innerLoopsPerPart.Add(flat.InnerLoops);
                 }
