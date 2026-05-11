@@ -164,6 +164,12 @@ namespace SeaNest.Nesting.Core.Nesting
             BestPlacement best = null;
             int overlapRejections = 0;
 
+            // Phase 7c.0 (TEMPORARY): log sheet state at TryPlaceOnSheet entry to
+            // verify whether sheet.Placed contents match what the "placed N" counter
+            // reports. Revert once the multi-sheet placement issue is identified.
+            DiagnosticLog?.Invoke(
+                $"  TryPlaceOnSheet entry: part={partIndex} sheet={sheetIdx} sheet.Placed.Count={sheet.Placed.Count}");
+
             long tForbidden = 0;
             long tFeasible = 0;
             long tBlSweep = 0;
@@ -245,8 +251,13 @@ namespace SeaNest.Nesting.Core.Nesting
                 // FinalVerifier uses, so anything we accept here, the verifier accepts.
                 var candidatePoly = orientation.CanonicalPolygon.Translate(tx, ty);
                 bool rejected = false;
+                // Phase 7c.0 (TEMPORARY): enumerate what the defensive check sees.
+                DiagnosticLog?.Invoke(
+                    $"    Defensive check enumerating prior placements on sheet {sheetIdx}: count={sheet.Placed.Count}");
                 foreach (var placed in sheet.Placed)
                 {
+                    DiagnosticLog?.Invoke(
+                        $"      prior part={placed.Orientation.SourcePartIndex} orient={placed.Orientation.OrientationIndex} pos=({placed.X:F3},{placed.Y:F3})");
                     var priorPoly = placed.Orientation.CanonicalPolygon.Translate(placed.X, placed.Y);
                     if (Overlap.OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
                     {
@@ -261,6 +272,15 @@ namespace SeaNest.Nesting.Core.Nesting
                     }
                 }
                 if (rejected) continue;
+
+                // Phase 7c.0 (TEMPORARY): log accepted candidate's bbox so we can
+                // compare geometrically against the prior placements logged above —
+                // catches "priors at (0.250,0.250) and candidate bbox at [0.250..]
+                // and no rejection" cases without a second test run.
+                var candBBox = candidatePoly.BoundingBox;
+                DiagnosticLog?.Invoke(
+                    $"    Defensive check passed for orient={orientation.OrientationIndex} at ({tx:F3},{ty:F3}) — " +
+                    $"candidatePoly bbox=[{candBBox.MinX:F3},{candBBox.MinY:F3}]-[{candBBox.MaxX:F3},{candBBox.MaxY:F3}]");
 
                 if (best == null ||
                     ty < best.Y - 1e-9 ||
