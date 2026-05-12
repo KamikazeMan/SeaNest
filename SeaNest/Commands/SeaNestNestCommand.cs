@@ -53,6 +53,26 @@ namespace SeaNest.Commands
         // alignment is more intuitive).
         private const double PartLabelAspectThresholdForRotate = 5.0;
 
+        // Phase 13 — auto-align elongated parts so their principal axis points
+        // along world +X before the engine sees them. This makes Every90 /
+        // Every45 rotation steps find fits for parts that were modeled at
+        // non-axis-aligned angles in Rhino (e.g. boat-side panels in boat
+        // coordinates, 15-25° from world XY). Engine receives pre-aligned
+        // polygons + matching pre-rotated inner-loop and outer-curve data;
+        // it has no awareness of the alignment.
+        //
+        // Aspect-ratio threshold: parts more elongated than 2:1 benefit from
+        // alignment. Below this, the PCA principal axis is geometrically
+        // unstable (Phase 11 audit) and the part's bbox is similar in both
+        // dimensions, so any rotation-step already finds a fitting orientation
+        // without help — pre-rotation would just risk arbitrary axis flipping.
+        private const double AutoAlignAspectThreshold = 2.0;
+
+        // Skip pre-rotation when the alignment angle is below this — avoids
+        // floating-point micro-rotations on already-aligned parts that would
+        // churn vertex data without changing fit. ~0.5° in radians.
+        private const double AutoAlignAngleEpsilon = 0.0087;
+
         // Phase 2 defaults — keep BLF the default to preserve Phase 1 behavior.
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.BLF;
         private const bool DefaultAllowMirror = true;
@@ -185,9 +205,63 @@ namespace SeaNest.Commands
                 }
                 else
                 {
-                    polygons.Add(flat.OuterPolygon);
-                    innerLoopsPerPart.Add(flat.InnerLoops);
-                    outerCurvePerPart.Add(flat.OuterCurve);
+                    var polygon = flat.OuterPolygon;
+                    var innerLoops = flat.InnerLoops;
+                    var outerCurve = flat.OuterCurve;
+
+                    // Phase 13: auto-align elongated parts so the principal axis
+                    // points along world +X before the engine ingests them. All
+                    // three of (polygon, inner loops, outer curve) are rotated
+                    // by the same angle around the same pivot (the polygon's
+                    // centroid, captured once before rotation since it's
+                    // rotation-invariant about itself) so they stay in lockstep.
+                    // Skip for near-square parts (PCA unstable) and for
+                    // already-aligned parts (avoids float churn).
+                    if (polygon.AspectRatio > AutoAlignAspectThreshold)
+                    {
+                        double alignAngle = -polygon.PrincipalAxisAngle;
+                        if (Math.Abs(alignAngle) > AutoAlignAngleEpsilon)
+                        {
+                            var pivot = polygon.Centroid;
+
+                            polygon = polygon.RotateAround(pivot, alignAngle);
+
+                            var pivot3d = new Point3d(pivot.X, pivot.Y, 0);
+                            var rotationXform = Transform.Rotation(alignAngle, Vector3d.ZAxis, pivot3d);
+
+                            if (innerLoops != null && innerLoops.Count > 0)
+                            {
+                                var rotatedLoops = new List<Curve>(innerLoops.Count);
+                                foreach (var loop in innerLoops)
+                                {
+                                    var dup = loop.DuplicateCurve();
+                                    if (dup != null && dup.Transform(rotationXform))
+                                        rotatedLoops.Add(dup);
+                                    // else: drop this loop only; rest of the
+                                    // part continues. Polygon and outer-curve
+                                    // are still consistent with the parts that
+                                    // did rotate; a single missing inner-loop
+                                    // is a graceful local degradation.
+                                }
+                                innerLoops = rotatedLoops;
+                            }
+
+                            if (outerCurve != null)
+                            {
+                                var dup = outerCurve.DuplicateCurve();
+                                if (dup != null && dup.Transform(rotationXform))
+                                    outerCurve = dup;
+                                else
+                                    outerCurve = null;   // fall back to Phase 9a's
+                                                          // polygon-rendered outer
+                                                          // at draw time.
+                            }
+                        }
+                    }
+
+                    polygons.Add(polygon);
+                    innerLoopsPerPart.Add(innerLoops);
+                    outerCurvePerPart.Add(outerCurve);
                     namesPerPart.Add(brepNames[i]);
                 }
             }
