@@ -68,6 +68,7 @@ namespace SeaNest
                 case "ratholes": RhinoApp.RunScript("SeaNestRatHoles", false); break;
                 case "trim": RhinoApp.RunScript("SeaNestTrim", false); break;
                 case "renest": RhinoApp.RunScript("SeaNestReNest", false); break;
+                case "export": RhinoApp.RunScript("SeaNestExport", false); break;
                 case "frames": RhinoApp.RunScript("SeaNestFrames", false); break;
                 case "plate": RhinoApp.RunScript("SeaNestPlate", false); break;
                 case "nest": RhinoApp.RunScript("SeaNestNest", false); break;
@@ -361,11 +362,7 @@ namespace SeaNest
       <div class=""tool-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><circle cx=""6"" cy=""6"" r=""3""/><path d=""M8.12 8.12L12 12""/><path d=""M20 4L8.12 15.88""/><circle cx=""6"" cy=""18"" r=""3""/><path d=""M14.8 14.8L20 20""/></svg></div>
       <div><div class=""tool-label"">Auto Trimming</div><div class=""tool-shortcut"">Ctrl+T</div></div>
     </div>
-    <div class=""tool-btn anim5"" style=""--accent:#2ecc71;--icon-bg:rgba(46,204,113,0.08);--icon-glow:rgba(46,204,113,0.12)"" onclick=""nav('renest')"">
-      <div class=""tool-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M21 12a9 9 0 11-3-6.7""/><polyline points=""21 3 21 9 15 9""/></svg></div>
-      <div><div class=""tool-label"">Re-Nest</div><div class=""tool-shortcut"">Ctrl+E</div></div>
-    </div>
-    <div class=""tool-btn anim6"" style=""--accent:#00cec9;--icon-bg:rgba(0,206,201,0.08);--icon-glow:rgba(0,206,201,0.12)"" onclick=""nav('frames')"">
+    <div class=""tool-btn anim5"" style=""--accent:#00cec9;--icon-bg:rgba(0,206,201,0.08);--icon-glow:rgba(0,206,201,0.12)"" onclick=""nav('frames')"">
       <div class=""tool-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><rect x=""3"" y=""3"" width=""18"" height=""18"" rx=""2""/><line x1=""12"" y1=""3"" x2=""12"" y2=""21"" stroke-dasharray=""3 2""/><line x1=""3"" y1=""12"" x2=""21"" y2=""12"" stroke-dasharray=""3 2""/></svg></div>
       <div><div class=""tool-label"">Frame Lines</div><div class=""tool-shortcut"">Ctrl+F</div></div>
     </div>
@@ -380,7 +377,19 @@ namespace SeaNest
   <div class=""hero-btn anim7"" onclick=""nav('nest')"">
     <div class=""shimmer""></div>
     <div class=""hero-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><rect x=""2"" y=""2"" width=""8"" height=""8"" rx=""1""/><rect x=""14"" y=""2"" width=""8"" height=""6"" rx=""1""/><rect x=""2"" y=""14"" width=""6"" height=""8"" rx=""1""/><rect x=""12"" y=""12"" width=""10"" height=""10"" rx=""1""/></svg></div>
-    <div class=""hero-text""><div class=""hero-label"">Nest & Export Plates</div><div class=""hero-desc"">Auto-nest by material → generate PDF / DXF</div></div>
+    <div class=""hero-text""><div class=""hero-label"">Nest</div><div class=""hero-desc"">Flatten plates and nest onto sheets</div></div>
+    <div class=""hero-arrow""><svg width=""14"" height=""14"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><path d=""M9 18l6-6-6-6""/></svg></div>
+  </div>
+  <div class=""hero-btn anim7"" onclick=""nav('renest')"">
+    <div class=""shimmer""></div>
+    <div class=""hero-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M21 12a9 9 0 11-3-6.7""/><polyline points=""21 3 21 9 15 9""/></svg></div>
+    <div class=""hero-text""><div class=""hero-label"">Re-Nest</div><div class=""hero-desc"">Re-nest existing curves with new parameters</div></div>
+    <div class=""hero-arrow""><svg width=""14"" height=""14"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><path d=""M9 18l6-6-6-6""/></svg></div>
+  </div>
+  <div class=""hero-btn anim7"" onclick=""nav('export')"">
+    <div class=""shimmer""></div>
+    <div class=""hero-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4""/><polyline points=""7 10 12 15 17 10""/><line x1=""12"" y1=""15"" x2=""12"" y2=""3""/></svg></div>
+    <div class=""hero-text""><div class=""hero-label"">Export</div><div class=""hero-desc"">Save nested output as DXF or DWG</div></div>
     <div class=""hero-arrow""><svg width=""14"" height=""14"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><path d=""M9 18l6-6-6-6""/></svg></div>
   </div>
 
@@ -410,7 +419,7 @@ function nav(cmd) {
   var log = document.getElementById('logWrap');
   var now = new Date();
   var t = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
-  var names = {thicken:'Thicken',slots:'Slots',ratholes:'Rat Holes',trim:'Trim',renest:'Re-Nest',frames:'Frames',plate:'Plate',nest:'Nest',settings:'Settings',close:'Close'};
+  var names = {thicken:'Thicken',slots:'Slots',ratholes:'Rat Holes',trim:'Trim',frames:'Frames',plate:'Plate',nest:'Nest',renest:'Re-Nest',export:'Export',settings:'Settings',close:'Close'};
   var entry = document.createElement('div');
   entry.className = 'log-entry';
   entry.innerHTML = '<span class=""log-time"">' + t + '</span><span class=""log-action"">' + (names[cmd]||cmd) + '</span><span class=""log-detail"">— activated</span>';
