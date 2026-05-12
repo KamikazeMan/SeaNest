@@ -56,6 +56,48 @@ namespace SeaNest.RhinoAdapters
         private const int MaxEscalations = 3;
 
         /// <summary>
+        /// Multiplier on the document tolerance for Step 1's planarity check.
+        /// Phase 14.1: boat plate faces are flat to ~0.01–0.02" in practice
+        /// but not to the modelTol-strict 0.001" that <see cref="BrepFace.IsPlanar"/>
+        /// demanded before this phase. Slightly-curved plate faces failed
+        /// IsPlanar(modelTol) → Step 1's largest-planar search picked tiny
+        /// truly-planar edge strips → extraction returned a 0.25"-wide strip
+        /// outline that downstream couldn't recover from.
+        /// <para>
+        /// 50× modelTol = 0.05" for inch docs at default modelTol = 0.001".
+        /// Catches plate faces that deviate up to 0.05" while genuinely curved
+        /// faces (developable surfaces with mm-scale curvature) still fail.
+        /// Best-fit-plane projection introduces up to this much geometric error
+        /// in the flattened polygon; well within typical kerf widths and only
+        /// slightly above precision CAM tolerance.
+        /// </para>
+        /// <para>
+        /// Only the planarity check uses this loosened tolerance — joins,
+        /// discretization, and downstream simplification continue to operate
+        /// at modelTol. If a future case needs tighter detection (precision
+        /// machining), drop this to ~10×.
+        /// </para>
+        /// </summary>
+        private const double PlanarityToleranceFactor = 50.0;
+
+        /// <summary>
+        /// Phase 14.1 area-floor for plate-face selection, relative to the
+        /// largest qualifying-planar face. A face must contribute at least
+        /// this fraction of the maximum candidate area to compete; smaller
+        /// faces are rejected.
+        /// <para>
+        /// Edge strips on thick plates are 0.1–0.8% of the plate face's area
+        /// (e.g. 7.5 / 6000 ≈ 0.1%), well below this 10% threshold. A stepped
+        /// or two-tiered plate where one face is &lt;10% of the other will
+        /// have the smaller face filtered out — correct for plate selection,
+        /// since the largest face is the one we want to project the outline
+        /// from. Two roughly-equal plate faces (e.g. top and bottom of a
+        /// uniform slab) both pass the floor; largest wins by area as before.
+        /// </para>
+        /// </summary>
+        private const double FaceAreaFloorRelative = 0.10;
+
+        /// <summary>
         /// Callback invoked when a part was flattened using Squish. Used by the command layer
         /// to inform the user that dimensions may be approximate for curved parts.
         /// </summary>
@@ -197,6 +239,15 @@ namespace SeaNest.RhinoAdapters
             // is acceptable: outer and inner loops travel through the same
             // facePlane downstream, so cut output is geometrically invariant
             // for symmetric stock.
+            // Phase 14.1: planarity check uses a loosened tolerance so that
+            // slightly-curved plate faces (e.g. boat plates flat to 0.01–0.02"
+            // but not to the strict modelTol) register as planar. The
+            // `tolerance` parameter passed in by the caller remains the
+            // strict tolerance for the rest of the flatten pipeline (joins,
+            // discretization, downstream simplification); only IsPlanar and
+            // TryGetPlane below use the loosened value.
+            double planarityTol = tolerance * PlanarityToleranceFactor;
+
             BrepFace best = null;
             double bestArea = -1;
 
@@ -207,11 +258,17 @@ namespace SeaNest.RhinoAdapters
             // both succeed (the actual selection criteria).
             RhinoApp.WriteLine($"BrepFlattener input: brep face count = {brep.Faces.Count}");
 
+            // Phase 14.1 first pass: collect every face that survives the
+            // (loosened) planarity, plane-fit, duplicate-face, and area-mass
+            // checks. We need all of them before applying the relative
+            // area-floor in the second pass.
+            var candidates = new List<(BrepFace face, double area)>();
+
             foreach (var face in brep.Faces)
             {
-                bool isPlanar = face.IsPlanar(tolerance);
+                bool isPlanar = face.IsPlanar(planarityTol);
                 Plane plane;
-                bool planeOk = isPlanar && face.TryGetPlane(out plane, tolerance);
+                bool planeOk = isPlanar && face.TryGetPlane(out plane, planarityTol);
 
                 var faceBrep = face.DuplicateFace(false);
                 var amp = (faceBrep != null) ? AreaMassProperties.Compute(faceBrep) : null;
@@ -249,10 +306,26 @@ namespace SeaNest.RhinoAdapters
                 if (faceBrep == null) continue;
                 if (amp == null) continue;
 
-                if (area > bestArea)
+                candidates.Add((face, area));
+            }
+
+            // Phase 14.1 second pass: apply the area-floor relative to the
+            // max candidate area, then pick the largest remaining.
+            if (candidates.Count > 0)
+            {
+                double maxArea = 0.0;
+                for (int i = 0; i < candidates.Count; i++)
+                    if (candidates[i].area > maxArea) maxArea = candidates[i].area;
+                double areaFloor = maxArea * FaceAreaFloorRelative;
+
+                foreach (var (face, area) in candidates)
                 {
-                    best = face;
-                    bestArea = area;
+                    if (area < areaFloor) continue;
+                    if (area > bestArea)
+                    {
+                        best = face;
+                        bestArea = area;
+                    }
                 }
             }
 
