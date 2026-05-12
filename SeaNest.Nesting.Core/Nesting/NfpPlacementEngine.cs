@@ -164,23 +164,6 @@ namespace SeaNest.Nesting.Core.Nesting
             BestPlacement best = null;
             int overlapRejections = 0;
 
-            // Phase 12 (TEMPORARY): entry-state diagnostic for the
-            // "part fits individually but doesn't get placed" investigation.
-            // Logs sheet dims, source bbox, and the per-part orientation count
-            // so we can verify the engine sees the expected enumeration. Each
-            // orientation gets its own fits-on-sheet line below.
-            var diagSourcePoly = _request.Polygons[partIndex];
-            var diagSrcBBox = diagSourcePoly.BoundingBox;
-            double diagSrcW = diagSrcBBox.MaxX - diagSrcBBox.MinX;
-            double diagSrcH = diagSrcBBox.MaxY - diagSrcBBox.MinY;
-            DiagnosticLog?.Invoke(
-                $"  TryPlaceOnSheet entry: part={partIndex} sheet={sheetIdx} " +
-                $"sheet.Placed.Count={sheet.Placed.Count} " +
-                $"source bbox: {diagSrcW:F2} × {diagSrcH:F2}, " +
-                $"sheet: {_request.SheetWidth:F2} × {_request.SheetHeight:F2} " +
-                $"(margin {_request.Margin:F2}), " +
-                $"orientations: {orientations.Count}");
-
             long tForbidden = 0;
             long tFeasible = 0;
             long tBlSweep = 0;
@@ -226,33 +209,6 @@ namespace SeaNest.Nesting.Core.Nesting
                 }
 
                 orientationsTried++;
-
-                // Phase 12 (TEMPORARY): per-orientation fits-on-sheet check
-                // mirroring InnerFitPolygon's logic. Logs whether each
-                // orientation's rotated bbox fits within the usable sheet
-                // area (sheet - 2·margin in each direction) and which axis
-                // failed when it doesn't. ifp.HasValue below is the
-                // authoritative gate, but this log shows the precondition
-                // so we can spot orientations that geometrically fit but
-                // get rejected anyway, vs orientations that genuinely
-                // can't fit at any position.
-                var canonBBox = orientation.BBox;
-                double oriW = canonBBox.MaxX - canonBBox.MinX;
-                double oriH = canonBBox.MaxY - canonBBox.MinY;
-                double usableW = _request.SheetWidth - 2.0 * _request.Margin;
-                double usableH = _request.SheetHeight - 2.0 * _request.Margin;
-                bool fitsW = oriW <= usableW;
-                bool fitsH = oriH <= usableH;
-                bool fitsBBox = fitsW && fitsH;
-                string failReason =
-                    fitsBBox ? "" :
-                    (!fitsW && !fitsH) ? $" ({oriW:F2} > {usableW:F2} AND {oriH:F2} > {usableH:F2})" :
-                    !fitsW ? $" ({oriW:F2} > {usableW:F2})" :
-                    $" ({oriH:F2} > {usableH:F2})";
-                DiagnosticLog?.Invoke(
-                    $"    orient {orientation.OrientationIndex}: " +
-                    $"rot {orientation.RotationDeg:F0}°, mirror={orientation.IsMirrored}, " +
-                    $"bbox {oriW:F2} × {oriH:F2}, fits={fitsBBox}{failReason}");
 
                 var ifp = InnerFitPolygon.Compute(
                     orientation, _request.SheetWidth, _request.SheetHeight, _request.Margin);
