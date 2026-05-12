@@ -165,13 +165,6 @@ namespace SeaNest.RhinoAdapters
         // intentional scribe mark.
         private const double ScribeLengthFilterFactor = 10.0;
 
-        // Phase 19b — sample count used to verify a Brep×Brep intersection
-        // curve actually lies on the chosen plane (Step 2 has no per-face
-        // restriction so intersections may live on the plate's back face).
-        // 5 evenly-spaced parameters catches mid-curve drift the endpoints
-        // would miss.
-        private const int ScribeCoplanaritySampleCount = 5;
-
         public static BrepFlattenResult Flatten(
             Brep brep, RhinoDoc doc,
             IReadOnlyList<Brep> scribeSourceBreps = null)
@@ -308,10 +301,9 @@ namespace SeaNest.RhinoAdapters
                     // Phase 19b.0.1.1 temporary diagnostic — dispatch tag.
                     Rhino.RhinoApp.WriteLine(
                         "[scribe-diag] Step 1 (twin-pair / largest-planar) calling EmitScribeLines " +
-                        "with full plate Brep, requireCoplanar=true.");
+                        "with full plate Brep.");
                     EmitScribeLines(
-                        brep, scribeSourceBreps, scribePlane,
-                        requireCoplanar: true, modelTol, scribeLines);
+                        brep, scribeSourceBreps, scribePlane, modelTol, scribeLines);
                     return poly;
                 }
                 outerCurve = null;
@@ -338,10 +330,9 @@ namespace SeaNest.RhinoAdapters
                         // Phase 19b.0.1.1 temporary diagnostic — dispatch tag.
                         Rhino.RhinoApp.WriteLine(
                             "[scribe-diag] Step 2 (fully-planar Brep) calling EmitScribeLines " +
-                            "with full Brep, requireCoplanar=true.");
+                            "with full Brep.");
                         EmitScribeLines(
-                            brep, scribeSourceBreps, plane,
-                            requireCoplanar: true, modelTol, scribeLines);
+                            brep, scribeSourceBreps, plane, modelTol, scribeLines);
                         return poly;
                     }
                     outerCurve = null;
@@ -439,7 +430,6 @@ namespace SeaNest.RhinoAdapters
             Brep plateGeometry,
             IReadOnlyList<Brep> memberBreps,
             Plane facePlane,
-            bool requireCoplanar,
             double modelTol,
             List<Curve> scribeLinesOut)
         {
@@ -449,19 +439,20 @@ namespace SeaNest.RhinoAdapters
             double minLength = modelTol * ScribeLengthFilterFactor;
             var plateBBox = plateGeometry.GetBoundingBox(true);
 
-            // Phase 19b.0.1 / 19b.0.1.1 temporary diagnostic — per-member drop
-            // accounting. Tagged [scribe-diag]; strip in Phase 19b.0.2.
+            // Phase 19b.0.1 / 19b.0.1.1 / 19b.0.3 temporary diagnostic —
+            // per-member drop accounting. Tagged [scribe-diag]; strip in
+            // Phase 19b.0.4.
             Rhino.RhinoApp.WriteLine(
                 $"[scribe-diag] EmitScribeLines entry: plate bbox diag={plateBBox.Diagonal.Length:F1}, " +
-                $"{memberBreps.Count} member(s), requireCoplanar={requireCoplanar}, modelTol={modelTol:G3}.");
+                $"{memberBreps.Count} member(s), modelTol={modelTol:G3}.");
 
             int memberIdx = 0;
             int bboxRejected = 0;
             int brepBrepFailed = 0;
             int emptyResult = 0;
             int lengthFiltered = 0;
-            int coplanarityFiltered = 0;
             int projectionFailed = 0;
+            int projectedTooShort = 0;
             int scribesEmitted = 0;
 
             foreach (var member in memberBreps)
@@ -506,29 +497,55 @@ namespace SeaNest.RhinoAdapters
                 {
                     if (c == null) continue;
 
-                    // Length filter: drop tangent-contact zero-or-near-zero
-                    // length curves.
+                    // 3D length filter: drop tangent-contact zero-or-near-zero
+                    // length curves before doing the (relatively expensive)
+                    // projection.
                     if (c.GetLength() < minLength)
                     {
                         lengthFiltered++;
                         continue;
                     }
 
-                    // Step 2 coplanarity filter: BrepBrep against a full Brep
-                    // returns curves on every face the member touches; we only
-                    // want curves on the chosen plate plane.
-                    if (requireCoplanar && !IsCurveCoplanarWithPlane(c, facePlane, modelTol))
-                    {
-                        coplanarityFiltered++;
-                        continue;
-                    }
-
+                    // Phase 19b.0.3: project to the chosen flatten plane
+                    // unconditionally. Intersection curves between plate and
+                    // member lie on the plate's faces (inside, outside, or
+                    // side strips) — not on the chosen flatten plane (which
+                    // sits at the twin-pair average, half a thickness off
+                    // each face). The earlier coplanarity filter rejected
+                    // these as non-coplanar; that was the wrong predicate.
+                    // ProjectCurveToPlaneSpace gives the curve's orthographic
+                    // 2D shadow on the flatten plane, which IS the scribe
+                    // mark we want regardless of source face.
+                    //
+                    // Duplicate-scribe caveat: BrepBrep against a closed
+                    // plate typically returns one curve per face the member
+                    // touches (inside + outside). Perpendicular crossings
+                    // project to identical positions on the flatten plane;
+                    // oblique crossings project to a pair offset by
+                    // ~thickness × tan(angle). Operators treat coincident or
+                    // near-coincident scribes as one mark — standard marine
+                    // practice. Dedup is deferred to Phase 19b.0.5 only if a
+                    // real workflow needs it.
                     var projected = ProjectCurveToPlaneSpace(c, facePlane, modelTol);
                     if (projected == null)
                     {
                         projectionFailed++;
                         continue;
                     }
+
+                    // Post-projection length filter: side-strip curves
+                    // (frame passing through the plate's vertical edge
+                    // strip) clear the 3D length filter at ~plate thickness
+                    // but project to near-points on the flatten plane
+                    // (the side strip is perpendicular to that plane). Same
+                    // 10×modelTol threshold; we want the projected scribe
+                    // to be a real visible mark, not a point artifact.
+                    if (projected.GetLength() < minLength)
+                    {
+                        projectedTooShort++;
+                        continue;
+                    }
+
                     scribeLinesOut.Add(projected);
                     scribesEmitted++;
                 }
@@ -538,28 +555,8 @@ namespace SeaNest.RhinoAdapters
                 $"[scribe-diag] EmitScribeLines summary: " +
                 $"bbox-rejected={bboxRejected}, brepBrep-failed={brepBrepFailed}, " +
                 $"empty-result={emptyResult}, length-filtered={lengthFiltered}, " +
-                $"coplanarity-filtered={coplanarityFiltered}, projection-failed={projectionFailed}, " +
+                $"projection-failed={projectionFailed}, projected-too-short={projectedTooShort}, " +
                 $"emitted={scribesEmitted}.");
-        }
-
-        /// <summary>
-        /// Sample a curve at <see cref="ScribeCoplanaritySampleCount"/> evenly-spaced
-        /// parameters and verify every sample lies within <paramref name="tol"/> of
-        /// <paramref name="plane"/>. Used in Step 2 to filter Brep×Brep results
-        /// down to just the curves on the chosen cut face.
-        /// </summary>
-        private static bool IsCurveCoplanarWithPlane(Curve curve, Plane plane, double tol)
-        {
-            if (curve == null) return false;
-            var domain = curve.Domain;
-            for (int i = 0; i <= ScribeCoplanaritySampleCount; i++)
-            {
-                double t = domain.T0 +
-                    (domain.T1 - domain.T0) * i / (double)ScribeCoplanaritySampleCount;
-                var pt = curve.PointAt(t);
-                if (Math.Abs(plane.DistanceTo(pt)) > tol) return false;
-            }
-            return true;
         }
 
         // ------------------------------------------------------------------

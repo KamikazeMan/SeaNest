@@ -90,6 +90,14 @@ namespace SeaNest.RhinoAdapters
         /// <see cref="BrepFlattener.ScribeWarning"/> and drop the scribes for
         /// the affected part. Curved-plate (Unroll) support is deferred to
         /// Phase 19b.2 via <c>Unroller.AddFollowingGeometry</c>.
+        ///
+        /// Phase 19b.0.3: intersection curves are projected to the flatten
+        /// plane unconditionally rather than filtered for plane-coplanarity.
+        /// Plate-vs-frame intersection curves naturally sit on the plate's
+        /// physical faces (~half a thickness off the twin-pair average plane);
+        /// orthographic projection lands the correct 2D scribe regardless of
+        /// source face. A post-projection length filter drops side-strip
+        /// intersections that project to near-point artifacts.
         /// </summary>
         public IReadOnlyList<Curve> ScribeLines { get; }
 
