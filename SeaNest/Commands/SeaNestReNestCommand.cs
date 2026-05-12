@@ -33,6 +33,13 @@ namespace SeaNest.Commands
         private const double DefaultMarginIn = 0.25;
         private const double DefaultSpacingIn = 0.25;
 
+        // Phase 18 — match BrepFlattener's vertex cap so the engine never sees
+        // a curve's raw chord-tessellation. Original Rhino Curve is preserved
+        // separately for visual output (see outerCurvePerPart below).
+        private const int MaxVertices = 500;
+        private const double EscalationFactor = 2.0;
+        private const int MaxEscalations = 3;
+
         protected override Rhino.Commands.Result RunCommand(RhinoDoc doc, Rhino.Commands.RunMode mode)
         {
             bool isMetric = doc.ModelUnitSystem == UnitSystem.Millimeters
@@ -67,7 +74,19 @@ namespace SeaNest.Commands
             double discretizeTol = modelTol * 0.1;
             double angleTolRad = RhinoMath.ToRadians(0.5);
 
+            // Phase 18 — parallel lists. Engine sees the simplified polygon;
+            // DrawNestingResult sees the original Rhino Curve. This is the
+            // same architecture SeaNestNest established for outer curves in
+            // Phase 9a (outerCurvePerPart). Native NURBS/arc/polyline
+            // representation survives the round-trip through the engine.
+            //
+            // TODO (Phase 18.1): inner-loop association. Today each closed
+            // curve becomes its own part; outer + hole curves selected
+            // together get nested as independent parts. A future phase
+            // should detect Curve.Contains topology to pair holes with
+            // their outer and plumb them through innerLoopsPerPart.
             var polygons = new List<Polygon>();
+            var outerCurvePerPart = new List<Curve>();
             for (int i = 0; i < go.ObjectCount; i++)
             {
                 var obj = go.Object(i);
@@ -78,15 +97,22 @@ namespace SeaNest.Commands
                     continue;
                 }
 
-                var poly = CurveToPolygon(curve, discretizeTol, angleTolRad);
-                if (poly == null)
+                var converted = CurveToPolygon(curve, discretizeTol, angleTolRad, MaxVertices);
+                if (converted == null)
                 {
                     RhinoApp.WriteLine($"Curve {i + 1}: could not convert — skipped.");
+                    continue;
                 }
-                else
+
+                var (poly, originalCurve, finalTol) = converted.Value;
+                if (finalTol > discretizeTol + 1e-12)
                 {
-                    polygons.Add(poly);
+                    RhinoApp.WriteLine(
+                        $"Curve {i + 1}: simplified at tol {finalTol:G3} to fit {MaxVertices}-vertex cap " +
+                        $"(escalated from {discretizeTol:G3}). Visual fidelity preserved via native curve.");
                 }
+                polygons.Add(poly);
+                outerCurvePerPart.Add(originalCurve);
             }
 
             if (polygons.Count == 0)
@@ -149,7 +175,14 @@ namespace SeaNest.Commands
                 return Rhino.Commands.Result.Nothing;
             }
 
-            SeaNestNestCommand.DrawNestingResult(doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric);
+            // Phase 18 — explicit nulls for innerLoopsPerPart and namesPerPart
+            // document that those features are deferred (see Phase 18.1
+            // TODO above for inner-loop association).
+            SeaNestNestCommand.DrawNestingResult(
+                doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric,
+                innerLoopsPerPart: null,
+                namesPerPart: null,
+                outerCurvePerPart: outerCurvePerPart);
 
             RhinoApp.WriteLine(
                 $"SeaNest Re-Nest: placed {response.Placements.Count}/{polygons.Count} curves on {response.SheetCount} sheet(s), " +
@@ -168,8 +201,14 @@ namespace SeaNest.Commands
         /// Convert a closed 2D curve to a <see cref="Polygon"/> on its own best-fit plane.
         /// For a curve that already lies on world XY (typical re-nest input), this resolves
         /// to XY directly. For tilted/rotated 2D curves it still flattens cleanly.
+        ///
+        /// Phase 18: returns the original Rhino curve alongside the polygon so the
+        /// draw path can preserve native NURBS/arc/polyline representation
+        /// (mirrors SeaNestNest's outerCurvePerPart). Applies Polygon.SimplifyToTarget
+        /// with the same vertex-cap escalation pattern BrepFlattener uses.
         /// </summary>
-        private static Polygon CurveToPolygon(Curve curve, double discretizeTol, double angleTolRad)
+        private static (Polygon polygon, Curve originalCurve, double finalTolerance)? CurveToPolygon(
+            Curve curve, double discretizeTol, double angleTolRad, int maxVertices)
         {
             if (!curve.IsClosed)
                 return null;
@@ -212,8 +251,34 @@ namespace SeaNest.Commands
             }
             if (points.Count < 3) return null;
 
-            try { return new Polygon(points); }
+            Polygon poly;
+            try { poly = new Polygon(points); }
             catch (ArgumentException) { return null; }
+
+            // Phase 18 — cap engine-input vertex count using the same DP +
+            // escalation pattern BrepFlattener uses for Brep-source polygons.
+            // The native Rhino curve is returned separately so the visual
+            // output is unaffected by this simplification.
+            Polygon simplified;
+            double finalTol;
+            try
+            {
+                simplified = poly.SimplifyToTarget(
+                    initialTolerance: discretizeTol,
+                    maxVertices: maxVertices,
+                    escalationFactor: EscalationFactor,
+                    maxEscalations: MaxEscalations,
+                    out finalTol);
+            }
+            catch (ArgumentException)
+            {
+                // Defensive: SimplifyToTarget rejects bad inputs. Fall back to
+                // the unsimplified polygon so the part still gets a chance to nest.
+                simplified = poly;
+                finalTol = discretizeTol;
+            }
+
+            return (simplified, curve, finalTol);
         }
     }
 }
