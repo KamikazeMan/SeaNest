@@ -56,29 +56,36 @@ namespace SeaNest.RhinoAdapters
         private const int MaxEscalations = 3;
 
         /// <summary>
-        /// Multiplier on the document tolerance for Step 1's planarity check.
-        /// Phase 14.1: boat plate faces are flat to ~0.01–0.02" in practice
-        /// but not to the modelTol-strict 0.001" that <see cref="BrepFace.IsPlanar"/>
-        /// demanded before this phase. Slightly-curved plate faces failed
-        /// IsPlanar(modelTol) → Step 1's largest-planar search picked tiny
-        /// truly-planar edge strips → extraction returned a 0.25"-wide strip
-        /// outline that downstream couldn't recover from.
+        /// Multiplier on the document tolerance for the planarity-related checks
+        /// in Step 1 (face selection AND face-plane extraction inside
+        /// <see cref="FaceToPolygon"/>). Phase 14.1: boat plate faces are flat
+        /// to ~0.01–0.02" on smaller parts but not to the strict modelTol of
+        /// ~0.001"; Phase 14.1.1: 186"-class boat parts have plate faces flat
+        /// to ~0.05–0.08" (non-planarity scales with span), and the
+        /// parameterless <c>BrepFace.TryGetPlane</c> in <see cref="FaceToPolygon"/>
+        /// was rejecting them with its own RhinoMath.ZeroTolerance default —
+        /// same parameterless-overload bug Phase 7c.3 fixed in
+        /// <see cref="FindLargestPlanarFace"/>. Both call sites now use this
+        /// loosened tolerance.
         /// <para>
-        /// 50× modelTol = 0.05" for inch docs at default modelTol = 0.001".
-        /// Catches plate faces that deviate up to 0.05" while genuinely curved
-        /// faces (developable surfaces with mm-scale curvature) still fail.
-        /// Best-fit-plane projection introduces up to this much geometric error
-        /// in the flattened polygon; well within typical kerf widths and only
-        /// slightly above precision CAM tolerance.
+        /// 100× modelTol = 0.10" for inch docs at default modelTol = 0.001".
+        /// Catches plate faces that deviate up to 0.10" while genuinely curved
+        /// faces (developable surfaces with mm-scale curvature, cones, sphere
+        /// segments) still fail. The bound matches typical plate-cutter kerf
+        /// width (0.05–0.10"), so any geometric error introduced by best-fit-
+        /// plane projection is within what the cutter would absorb anyway.
         /// </para>
         /// <para>
-        /// Only the planarity check uses this loosened tolerance — joins,
-        /// discretization, and downstream simplification continue to operate
-        /// at modelTol. If a future case needs tighter detection (precision
-        /// machining), drop this to ~10×.
+        /// Only the two planarity checks use this loosened tolerance — polyline
+        /// discretization (<see cref="CurveToPolygonOnPlane"/>) and plane-to-
+        /// plane projection (<see cref="ProjectCurveToPlaneSpace"/>) continue
+        /// to operate at modelTol so the polygon vertices and native curves
+        /// stay accurate to model tolerance on whichever plane was chosen.
+        /// If a future precision-machining case needs tighter detection, drop
+        /// this to ~25× or ~10×.
         /// </para>
         /// </summary>
-        private const double PlanarityToleranceFactor = 50.0;
+        private const double PlanarityToleranceFactor = 100.0;
 
         /// <summary>
         /// Phase 14.1 area-floor for plate-face selection, relative to the
@@ -156,7 +163,7 @@ namespace SeaNest.RhinoAdapters
             var plateFace = FindLargestPlanarFace(brep, modelTol);
             if (plateFace != null)
             {
-                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
+                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, modelTol * PlanarityToleranceFactor, out outerCurve, innerLoops);
                 if (poly != null)
                 {
                     // Phase 14 (TEMPORARY): outer-loop-after-extraction log.
@@ -338,12 +345,18 @@ namespace SeaNest.RhinoAdapters
             return best;
         }
 
-        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, out Curve outerCurveOut, List<Curve> innerLoopsOut)
+        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, double planarityTol, out Curve outerCurveOut, List<Curve> innerLoopsOut)
         {
             outerCurveOut = null;
 
+            // Phase 14.1.1: use the loosened planarity tolerance for plane
+            // extraction. The face passed FindLargestPlanarFace's
+            // IsPlanar(planarityTol) check; the parameterless TryGetPlane
+            // overload defaults to RhinoMath.ZeroTolerance which would
+            // re-reject it. Match the tolerance used in selection so
+            // anything Step 1 accepts is extractable here.
             Plane facePlane;
-            if (!face.TryGetPlane(out facePlane)) return null;
+            if (!face.TryGetPlane(out facePlane, planarityTol)) return null;
 
             var faceBrep = face.DuplicateFace(false);
             if (faceBrep == null) return null;
