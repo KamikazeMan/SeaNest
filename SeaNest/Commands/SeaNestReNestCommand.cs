@@ -206,6 +206,23 @@ namespace SeaNest.Commands
         /// draw path can preserve native NURBS/arc/polyline representation
         /// (mirrors SeaNestNest's outerCurvePerPart). Applies Polygon.SimplifyToTarget
         /// with the same vertex-cap escalation pattern BrepFlattener uses.
+        ///
+        /// Phase 18.1: the returned curve is mapped into the polygon's source frame
+        /// before being handed back. The polygon's UV coords are produced by
+        /// <c>plane.ClosestParameter</c>, which is the per-point form of
+        /// <c>Transform.PlaneToPlane(plane, Plane.WorldXY)</c>; the native curve has
+        /// to live in the same plane-local frame or <see cref="PlacementResult.Transform"/>
+        /// (whose step1 = <c>-srcBBox.Min</c> is taken from the polygon's bounding box)
+        /// will subtract a plane-local quantity from a world-space curve and place the
+        /// result at the wrong world position. For an offset or flipped <c>TryGetPlane</c>
+        /// result this produces visible mis-placement; the original SeaNestReNest
+        /// regression manifested as a placed curve hundreds of inches off the sheet.
+        ///
+        /// Symmetric with <c>BrepFlattener.ProjectCurveToPlaneSpace</c> (Phase 15.1) —
+        /// same primitive, same purpose: align the native curve with the frame the
+        /// polygon was built in. If <c>TryGetPlane</c> returned <see cref="Plane.WorldXY"/>
+        /// the PlaneToPlane transform is identity, so curves already at world origin
+        /// pass through unchanged.
         /// </summary>
         private static (Polygon polygon, Curve originalCurve, double finalTolerance)? CurveToPolygon(
             Curve curve, double discretizeTol, double angleTolRad, int maxVertices)
@@ -278,7 +295,26 @@ namespace SeaNest.Commands
                 finalTol = discretizeTol;
             }
 
-            return (simplified, curve, finalTol);
+            // Phase 18.1 — map the native curve into the polygon's source frame
+            // (plane-local). The polygon's UV coords came from plane.ClosestParameter,
+            // which is the per-point form of Transform.PlaneToPlane(plane, WorldXY);
+            // PlaneToPlane gives us the matrix form for a full Curve.
+            //
+            // ProjectToPlane first matches Phase 15.1's pattern: it guards against
+            // curves that drift slightly off the best-fit plane (the rigid
+            // PlaneToPlane transform preserves the perpendicular component, leaving
+            // residual Z otherwise). For a curve already coplanar with `plane` this
+            // is near-identity. Graceful fallback on null preserves prior behavior.
+            //
+            // If TryGetPlane returned Plane.WorldXY, PlaneToPlane is identity and
+            // this whole block is a no-op for curves already at world origin.
+            var localCurve = curve.DuplicateCurve();
+            var projected = Curve.ProjectToPlane(localCurve, plane);
+            if (projected != null) localCurve = projected;
+            var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
+            localCurve.Transform(planeToXY);
+
+            return (simplified, localCurve, finalTol);
         }
     }
 }
