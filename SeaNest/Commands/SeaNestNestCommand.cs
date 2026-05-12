@@ -201,7 +201,10 @@ namespace SeaNest.Commands
                 var flat = BrepFlattener.Flatten(breps[i], doc);
                 if (flat == null)
                 {
-                    RhinoApp.WriteLine($"Part {i + 1}: could not flatten — skipped.");
+                    RhinoApp.WriteLine(
+                        $"Part {i + 1}: could not flatten (no twin pair, no planar face, " +
+                        "unroll failed, squish failed) — skipped. " +
+                        "Check that this part is a closed solid or single planar surface.");
                 }
                 else
                 {
