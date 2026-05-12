@@ -413,6 +413,12 @@ namespace SeaNest.RhinoAdapters
             double minLength = modelTol * ScribeLengthFilterFactor;
             var plateBBox = plateGeometry.GetBoundingBox(true);
 
+            // Phase 19b.0.1 temporary diagnostic — confirms EmitScribeLines is
+            // reached and shows what input it received. Strip in Phase 19b.0.2.
+            Rhino.RhinoApp.WriteLine(
+                $"[scribe-diag] EmitScribeLines: plate bbox {plateBBox.Diagonal.Length:F1}, " +
+                $"{memberBreps.Count} member(s) to test.");
+
             foreach (var member in memberBreps)
             {
                 if (member == null) continue;

@@ -177,53 +177,63 @@ namespace SeaNest.Commands
             // prompt isn't re-consumed here. Filter by ObjectId against
             // plateObjectIds so a user who fat-fingers a plate into the member
             // selection doesn't get self-intersection garbage.
+            //
+            // Phase 19b.0.1: result handling uses CommandResult() + ObjectCount,
+            // matching the plate prompt's pattern (see line 130 block). The prior
+            // GetResult.Object-vs-Nothing check fired silently empty when
+            // AcceptNothing(true) caused the post-pick Enter to return
+            // GetResult.Nothing in some Rhino 8 configurations — picks were
+            // accessible via ObjectCount but the if/else discarded them.
+            // CommandResult only distinguishes Success / Cancel, so picks
+            // survive whatever GetResult value the API actually returned.
             var memberBreps = new List<Brep>();
             var goMembers = new GetObject();
-            goMembers.SetCommandPrompt("Select structural members for scribe lines (press Enter to skip)");
+            goMembers.SetCommandPrompt("Select structural members for scribe lines, or press Enter to skip");
             goMembers.GeometryFilter = ObjectType.Brep | ObjectType.Extrusion | ObjectType.Surface;
             goMembers.GroupSelect = true;
             goMembers.SubObjectSelect = false;
             goMembers.AcceptNothing(true);
             goMembers.EnablePreSelect(false, true);
-            var memberResult = goMembers.GetMultiple(0, 0);
-            // GetResult.Nothing == user pressed Enter (no scribe sources, proceed).
-            // GetResult.Object == one or more members picked. Anything else =
-            // cancel or error → abort the whole command.
-            if (memberResult == GetResult.Object)
+            goMembers.GetMultiple(0, 0);
+            var memberCmdResult = goMembers.CommandResult();
+            if (memberCmdResult == Rhino.Commands.Result.Cancel)
+                return memberCmdResult;
+            // Success path covers both "picked + Enter" and "Enter immediately"
+            // — distinguished only by goMembers.ObjectCount.
+
+            int selfPickedCount = 0;
+            for (int i = 0; i < goMembers.ObjectCount; i++)
             {
-                int selfPickedCount = 0;
-                for (int i = 0; i < goMembers.ObjectCount; i++)
+                var obj = goMembers.Object(i);
+                if (plateObjectIds.Contains(obj.ObjectId))
                 {
-                    var obj = goMembers.Object(i);
-                    if (plateObjectIds.Contains(obj.ObjectId))
-                    {
-                        selfPickedCount++;
-                        continue;
-                    }
-                    var mbrep = obj.Brep();
-                    if (mbrep == null)
-                    {
-                        var ext = obj.Geometry() as Extrusion;
-                        if (ext != null) mbrep = ext.ToBrep();
-                    }
-                    if (mbrep == null)
-                    {
-                        var srf = obj.Geometry() as Surface;
-                        if (srf != null) mbrep = Brep.CreateFromSurface(srf);
-                    }
-                    if (mbrep != null) memberBreps.Add(mbrep);
+                    selfPickedCount++;
+                    continue;
                 }
-                if (selfPickedCount > 0)
+                var mbrep = obj.Brep();
+                if (mbrep == null)
                 {
-                    RhinoApp.WriteLine(
-                        $"{selfPickedCount} plate(s) re-picked as scribe members — filtered out " +
-                        "(plates can't scribe themselves).");
+                    var ext = obj.Geometry() as Extrusion;
+                    if (ext != null) mbrep = ext.ToBrep();
                 }
+                if (mbrep == null)
+                {
+                    var srf = obj.Geometry() as Surface;
+                    if (srf != null) mbrep = Brep.CreateFromSurface(srf);
+                }
+                if (mbrep != null) memberBreps.Add(mbrep);
             }
-            else if (memberResult != GetResult.Nothing)
+            if (selfPickedCount > 0)
             {
-                return Rhino.Commands.Result.Cancel;
+                RhinoApp.WriteLine(
+                    $"{selfPickedCount} plate(s) re-picked as scribe members — filtered out " +
+                    "(plates can't scribe themselves).");
             }
+
+            // Phase 19b.0.1 temporary diagnostic — verifies the fix populates
+            // memberBreps. Tagged [scribe-diag] for easy strip in Phase 19b.0.2.
+            RhinoApp.WriteLine(
+                $"[scribe-diag] memberBreps populated with {memberBreps.Count} member(s) after selection.");
 
             // Wire the squish warning so users see which parts came through Squish
             // (and will therefore have approximate dimensions). Single writer:
