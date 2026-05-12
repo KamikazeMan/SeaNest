@@ -276,6 +276,10 @@ namespace SeaNest.RhinoAdapters
                             : Plane.WorldXY);
                     using (var faceBrep = plateFace.DuplicateFace(false))
                     {
+                        // Phase 19b.0.1.1 temporary diagnostic — dispatch tag.
+                        Rhino.RhinoApp.WriteLine(
+                            "[scribe-diag] Step 1 (twin-pair / largest-planar) calling EmitScribeLines " +
+                            "with plateFace.DuplicateFace, requireCoplanar=false.");
                         EmitScribeLines(
                             faceBrep, scribeSourceBreps, scribePlane,
                             requireCoplanar: false, modelTol, scribeLines);
@@ -303,6 +307,10 @@ namespace SeaNest.RhinoAdapters
                         // curves on the chosen plane (drops back-face copies
                         // for thickened sheets, side-edge curves at member
                         // pass-through, etc.).
+                        // Phase 19b.0.1.1 temporary diagnostic — dispatch tag.
+                        Rhino.RhinoApp.WriteLine(
+                            "[scribe-diag] Step 2 (fully-planar Brep) calling EmitScribeLines " +
+                            "with full Brep, requireCoplanar=true.");
                         EmitScribeLines(
                             brep, scribeSourceBreps, plane,
                             requireCoplanar: true, modelTol, scribeLines);
@@ -413,25 +421,58 @@ namespace SeaNest.RhinoAdapters
             double minLength = modelTol * ScribeLengthFilterFactor;
             var plateBBox = plateGeometry.GetBoundingBox(true);
 
-            // Phase 19b.0.1 temporary diagnostic — confirms EmitScribeLines is
-            // reached and shows what input it received. Strip in Phase 19b.0.2.
+            // Phase 19b.0.1 / 19b.0.1.1 temporary diagnostic — per-member drop
+            // accounting. Tagged [scribe-diag]; strip in Phase 19b.0.2.
             Rhino.RhinoApp.WriteLine(
-                $"[scribe-diag] EmitScribeLines: plate bbox {plateBBox.Diagonal.Length:F1}, " +
-                $"{memberBreps.Count} member(s) to test.");
+                $"[scribe-diag] EmitScribeLines entry: plate bbox diag={plateBBox.Diagonal.Length:F1}, " +
+                $"{memberBreps.Count} member(s), requireCoplanar={requireCoplanar}, modelTol={modelTol:G3}.");
+
+            int memberIdx = 0;
+            int bboxRejected = 0;
+            int brepBrepFailed = 0;
+            int emptyResult = 0;
+            int lengthFiltered = 0;
+            int coplanarityFiltered = 0;
+            int projectionFailed = 0;
+            int scribesEmitted = 0;
 
             foreach (var member in memberBreps)
             {
+                memberIdx++;
                 if (member == null) continue;
 
                 // Bbox prefilter — skip members that can't touch this plate.
                 var memberBBox = member.GetBoundingBox(true);
                 var overlap = BoundingBox.Intersection(plateBBox, memberBBox);
-                if (!overlap.IsValid) continue;
+                if (!overlap.IsValid)
+                {
+                    bboxRejected++;
+                    Rhino.RhinoApp.WriteLine(
+                        $"[scribe-diag] Member {memberIdx}: bbox no overlap with plate, skipped.");
+                    continue;
+                }
 
                 bool ok = Rhino.Geometry.Intersect.Intersection.BrepBrep(
                     plateGeometry, member, modelTol,
-                    out Curve[] curves, out _);
-                if (!ok || curves == null) continue;
+                    out Curve[] curves, out Point3d[] pts);
+                if (!ok)
+                {
+                    brepBrepFailed++;
+                    Rhino.RhinoApp.WriteLine(
+                        $"[scribe-diag] Member {memberIdx}: BrepBrep returned false.");
+                    continue;
+                }
+                if (curves == null || curves.Length == 0)
+                {
+                    emptyResult++;
+                    Rhino.RhinoApp.WriteLine(
+                        $"[scribe-diag] Member {memberIdx}: BrepBrep returned 0 curves " +
+                        $"({pts?.Length ?? 0} points).");
+                    continue;
+                }
+
+                Rhino.RhinoApp.WriteLine(
+                    $"[scribe-diag] Member {memberIdx}: BrepBrep returned {curves.Length} curve(s).");
 
                 foreach (var c in curves)
                 {
@@ -439,18 +480,38 @@ namespace SeaNest.RhinoAdapters
 
                     // Length filter: drop tangent-contact zero-or-near-zero
                     // length curves.
-                    if (c.GetLength() < minLength) continue;
+                    if (c.GetLength() < minLength)
+                    {
+                        lengthFiltered++;
+                        continue;
+                    }
 
                     // Step 2 coplanarity filter: BrepBrep against a full Brep
                     // returns curves on every face the member touches; we only
                     // want curves on the chosen plate plane.
                     if (requireCoplanar && !IsCurveCoplanarWithPlane(c, facePlane, modelTol))
+                    {
+                        coplanarityFiltered++;
                         continue;
+                    }
 
                     var projected = ProjectCurveToPlaneSpace(c, facePlane, modelTol);
-                    if (projected != null) scribeLinesOut.Add(projected);
+                    if (projected == null)
+                    {
+                        projectionFailed++;
+                        continue;
+                    }
+                    scribeLinesOut.Add(projected);
+                    scribesEmitted++;
                 }
             }
+
+            Rhino.RhinoApp.WriteLine(
+                $"[scribe-diag] EmitScribeLines summary: " +
+                $"bbox-rejected={bboxRejected}, brepBrep-failed={brepBrepFailed}, " +
+                $"empty-result={emptyResult}, length-filtered={lengthFiltered}, " +
+                $"coplanarity-filtered={coplanarityFiltered}, projection-failed={projectionFailed}, " +
+                $"emitted={scribesEmitted}.");
         }
 
         /// <summary>
