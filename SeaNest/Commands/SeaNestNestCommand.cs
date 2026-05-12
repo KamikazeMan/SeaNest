@@ -19,9 +19,6 @@ namespace SeaNest.Commands
     {
         public override string EnglishName => "SeaNestNest";
 
-        private const string LayerNested = "SeaNest_Nested";
-        private const string LayerSheets = "SeaNest_Sheets";
-        private const string LayerLabels = "SeaNest_Labels";
         private const string DimStyleName = "SeaNest_Labels";
 
         private const double DefaultSheetWidthIn = 96.0;
@@ -382,9 +379,9 @@ namespace SeaNest.Commands
             var partLabelFont = Rhino.DocObjects.Font.FromQuartetProperties(PartLabelFontFace, false, false);
             bool partLabelFontMissingWarned = false;
 
-            int layerNestedIdx = EnsureLayer(doc, LayerNested, System.Drawing.Color.Black);
-            int layerSheetsIdx = EnsureLayer(doc, LayerSheets, System.Drawing.Color.Black);
-            int layerLabelsIdx = EnsureLayer(doc, LayerLabels, System.Drawing.Color.Magenta);
+            int layerNestedIdx = EnsureLayer(doc, SeaNestLayers.Nested, System.Drawing.Color.Black);
+            int layerSheetsIdx = EnsureLayer(doc, SeaNestLayers.Sheets, System.Drawing.Color.Black);
+            int layerLabelsIdx = EnsureLayer(doc, SeaNestLayers.Labels, System.Drawing.Color.Magenta);
             int dimStyleIdx = EnsureDimStyle(doc, DimStyleName);
             var dimStyle = doc.DimStyles[dimStyleIdx];
 
