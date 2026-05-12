@@ -262,28 +262,56 @@ namespace SeaNest.RhinoAdapters
                 var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, modelTol * PlanarityToleranceFactor, projectionPlane, out outerCurve, innerLoops);
                 if (poly != null)
                 {
-                    // Phase 19b — Step 1 scribe emission. The cut face is
-                    // known (plateFace); intersect plateFace.DuplicateFace(false)
-                    // against each member so the result curves respect the
-                    // face's trim (one BrepBrep call per member instead of
-                    // BrepSurface-then-trim). Plane is the override plane for
-                    // twin pairs (Phase 14.1.2 average plane), else the face's
-                    // own TryGetPlane result — same plane used for inner-loop
-                    // projection, so scribes land in the same source frame.
+                    // Phase 19b — Step 1 scribe emission. Phase 19b.0.2: use
+                    // the FULL plate Brep (not plateFace.DuplicateFace(false))
+                    // and apply the coplanarity filter.
+                    //
+                    // Root cause from Phase 19b.0.1.1 diagnostics: Phase 14.1.2
+                    // twin-pair detection picks the OUTSIDE face of the
+                    // thickened plate as plateFace (correct for flattening —
+                    // the flat pattern lives on the outer cutting surface).
+                    // But marine structural members (frames, longitudinals,
+                    // bulkheads) attach to the INSIDE face of the hull plate.
+                    // BrepBrep(plateFace.DuplicateFace(false), member) was
+                    // running against the outside face and correctly returning
+                    // zero curves — the frames genuinely don't touch that
+                    // face; they touch the parallel inside face one plate
+                    // thickness away. Bbox prefilter passed because the
+                    // plate's bbox encompasses both faces.
+                    //
+                    // Fix: intersect against the full closed plate Brep —
+                    // BrepBrep returns curves wherever the member meets ANY
+                    // face of the plate (inside, outside, side strips). The
+                    // coplanarity filter (already used by Step 2) then drops
+                    // curves not on the chosen cut plane, so the surviving
+                    // curves are exactly the frame-on-inside-face scribes
+                    // projected onto the outside-face plane — which is what
+                    // ProjectCurveToPlaneSpace lands in the flat pattern.
+                    //
+                    // Coplanarity tolerance = modelTol. For a 0.125"-thick
+                    // plate at 0.01" model tol, opposite-face separation is
+                    // 12.5× the tolerance margin — the filter cleanly drops
+                    // back-face intersections. Side-strip intersections lie
+                    // on planes perpendicular to the cut plane and fail the
+                    // filter by an even larger margin.
+                    //
+                    // scribePlane is the chosen cut plane: the override plane
+                    // for twin pairs (Phase 14.1.2 average plane), else the
+                    // selected face's own TryGetPlane result. Same plane the
+                    // outer / inner-loop projections used, so scribes share
+                    // the same source frame and survive the placement
+                    // transform alongside them.
                     Plane scribePlane = projectionPlane
                         ?? (plateFace.TryGetPlane(out Plane facePlane, modelTol * PlanarityToleranceFactor)
                             ? facePlane
                             : Plane.WorldXY);
-                    using (var faceBrep = plateFace.DuplicateFace(false))
-                    {
-                        // Phase 19b.0.1.1 temporary diagnostic — dispatch tag.
-                        Rhino.RhinoApp.WriteLine(
-                            "[scribe-diag] Step 1 (twin-pair / largest-planar) calling EmitScribeLines " +
-                            "with plateFace.DuplicateFace, requireCoplanar=false.");
-                        EmitScribeLines(
-                            faceBrep, scribeSourceBreps, scribePlane,
-                            requireCoplanar: false, modelTol, scribeLines);
-                    }
+                    // Phase 19b.0.1.1 temporary diagnostic — dispatch tag.
+                    Rhino.RhinoApp.WriteLine(
+                        "[scribe-diag] Step 1 (twin-pair / largest-planar) calling EmitScribeLines " +
+                        "with full plate Brep, requireCoplanar=true.");
+                    EmitScribeLines(
+                        brep, scribeSourceBreps, scribePlane,
+                        requireCoplanar: true, modelTol, scribeLines);
                     return poly;
                 }
                 outerCurve = null;
