@@ -115,7 +115,22 @@ namespace SeaNest.RhinoAdapters
             if (plateFace != null)
             {
                 var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
-                if (poly != null) return poly;
+                if (poly != null)
+                {
+                    // Phase 14 (TEMPORARY): outer-loop-after-extraction log.
+                    // Vertex count is post-CurveToPolygonOnPlane (still pre-
+                    // SimplifyToTarget); bbox is in the face plane's UV frame.
+                    var pbb = poly.BoundingBox;
+                    RhinoApp.WriteLine(
+                        $"  Outer loop after extraction: {poly.Count} verts, " +
+                        $"bbox={pbb.MaxX - pbb.MinX:F2}×{pbb.MaxY - pbb.MinY:F2} (UV frame)");
+                    return poly;
+                }
+                // Phase 14 (TEMPORARY): FaceToPolygon rejected the selected face.
+                RhinoApp.WriteLine(
+                    $"  FaceToPolygon returned null for face {plateFace.FaceIndex} " +
+                    "(TryGetPlane parameterless overload or outer-loop extraction failed); " +
+                    "falling through to Step 2.");
                 outerCurve = null;
                 innerLoops.Clear();
             }
@@ -185,23 +200,67 @@ namespace SeaNest.RhinoAdapters
             BrepFace best = null;
             double bestArea = -1;
 
+            // Phase 14 (TEMPORARY): inventory the brep's faces so we can see
+            // exactly which face is winning the area race for thick-vs-thin
+            // versions of the same part. Compares per-face area, bbox, outer-
+            // loop vertex count, and whether IsPlanar + TryGetPlane(tolerance)
+            // both succeed (the actual selection criteria).
+            RhinoApp.WriteLine($"BrepFlattener input: brep face count = {brep.Faces.Count}");
+
             foreach (var face in brep.Faces)
             {
-                if (!face.IsPlanar(tolerance)) continue;
+                bool isPlanar = face.IsPlanar(tolerance);
                 Plane plane;
-                if (!face.TryGetPlane(out plane, tolerance)) continue;
+                bool planeOk = isPlanar && face.TryGetPlane(out plane, tolerance);
 
                 var faceBrep = face.DuplicateFace(false);
+                var amp = (faceBrep != null) ? AreaMassProperties.Compute(faceBrep) : null;
+                double area = amp?.Area ?? 0.0;
+
+                // Phase 14 diagnostic: per-face report. bbox is in 3D world units,
+                // outerLoopVerts is polyline count if the loop is a polyline else
+                // NurbsCurve.Points.Count else -1.
+                string bboxStr = "n/a";
+                int outerLoopVerts = -1;
+                if (faceBrep != null)
+                {
+                    var bb = faceBrep.GetBoundingBox(true);
+                    bboxStr = $"{bb.Max.X - bb.Min.X:F2}×{bb.Max.Y - bb.Min.Y:F2}×{bb.Max.Z - bb.Min.Z:F2}";
+                    foreach (var loop in faceBrep.Loops)
+                    {
+                        if (loop.LoopType == BrepLoopType.Outer)
+                        {
+                            var crv = loop.To3dCurve();
+                            if (crv != null)
+                            {
+                                if (crv.TryGetPolyline(out var pl)) outerLoopVerts = pl.Count;
+                                else if (crv is NurbsCurve nc) outerLoopVerts = nc.Points.Count;
+                            }
+                            break;
+                        }
+                    }
+                }
+                RhinoApp.WriteLine(
+                    $"  Face {face.FaceIndex}: planar={isPlanar}, planeOk={planeOk}, " +
+                    $"area={area:F2}, bbox={bboxStr}, outer loop verts={outerLoopVerts}");
+
+                if (!isPlanar) continue;
+                if (!planeOk) continue;
                 if (faceBrep == null) continue;
-                var amp = AreaMassProperties.Compute(faceBrep);
                 if (amp == null) continue;
 
-                if (amp.Area > bestArea)
+                if (area > bestArea)
                 {
                     best = face;
-                    bestArea = amp.Area;
+                    bestArea = area;
                 }
             }
+
+            // Phase 14 (TEMPORARY): selection summary.
+            if (best != null)
+                RhinoApp.WriteLine($"  Selected face index {best.FaceIndex} (largest planar area = {bestArea:F2}).");
+            else
+                RhinoApp.WriteLine("  No planar face selected — falling through to Step 2.");
 
             return best;
         }
