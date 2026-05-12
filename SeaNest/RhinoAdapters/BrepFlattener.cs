@@ -298,10 +298,6 @@ namespace SeaNest.RhinoAdapters
                         ?? (plateFace.TryGetPlane(out Plane facePlane, modelTol * PlanarityToleranceFactor)
                             ? facePlane
                             : Plane.WorldXY);
-                    // Phase 19b.0.1.1 temporary diagnostic — dispatch tag.
-                    Rhino.RhinoApp.WriteLine(
-                        "[scribe-diag] Step 1 (twin-pair / largest-planar) calling EmitScribeLines " +
-                        "with full plate Brep.");
                     EmitScribeLines(
                         brep, scribeSourceBreps, scribePlane, modelTol, scribeLines);
                     return poly;
@@ -327,10 +323,6 @@ namespace SeaNest.RhinoAdapters
                         // curves on the chosen plane (drops back-face copies
                         // for thickened sheets, side-edge curves at member
                         // pass-through, etc.).
-                        // Phase 19b.0.1.1 temporary diagnostic — dispatch tag.
-                        Rhino.RhinoApp.WriteLine(
-                            "[scribe-diag] Step 2 (fully-planar Brep) calling EmitScribeLines " +
-                            "with full Brep.");
                         EmitScribeLines(
                             brep, scribeSourceBreps, plane, modelTol, scribeLines);
                         return poly;
@@ -439,59 +431,19 @@ namespace SeaNest.RhinoAdapters
             double minLength = modelTol * ScribeLengthFilterFactor;
             var plateBBox = plateGeometry.GetBoundingBox(true);
 
-            // Phase 19b.0.1 / 19b.0.1.1 / 19b.0.3 temporary diagnostic —
-            // per-member drop accounting. Tagged [scribe-diag]; strip in
-            // Phase 19b.0.4.
-            Rhino.RhinoApp.WriteLine(
-                $"[scribe-diag] EmitScribeLines entry: plate bbox diag={plateBBox.Diagonal.Length:F1}, " +
-                $"{memberBreps.Count} member(s), modelTol={modelTol:G3}.");
-
-            int memberIdx = 0;
-            int bboxRejected = 0;
-            int brepBrepFailed = 0;
-            int emptyResult = 0;
-            int lengthFiltered = 0;
-            int projectionFailed = 0;
-            int projectedTooShort = 0;
-            int scribesEmitted = 0;
-
             foreach (var member in memberBreps)
             {
-                memberIdx++;
                 if (member == null) continue;
 
                 // Bbox prefilter — skip members that can't touch this plate.
                 var memberBBox = member.GetBoundingBox(true);
                 var overlap = BoundingBox.Intersection(plateBBox, memberBBox);
-                if (!overlap.IsValid)
-                {
-                    bboxRejected++;
-                    Rhino.RhinoApp.WriteLine(
-                        $"[scribe-diag] Member {memberIdx}: bbox no overlap with plate, skipped.");
-                    continue;
-                }
+                if (!overlap.IsValid) continue;
 
                 bool ok = Rhino.Geometry.Intersect.Intersection.BrepBrep(
                     plateGeometry, member, modelTol,
-                    out Curve[] curves, out Point3d[] pts);
-                if (!ok)
-                {
-                    brepBrepFailed++;
-                    Rhino.RhinoApp.WriteLine(
-                        $"[scribe-diag] Member {memberIdx}: BrepBrep returned false.");
-                    continue;
-                }
-                if (curves == null || curves.Length == 0)
-                {
-                    emptyResult++;
-                    Rhino.RhinoApp.WriteLine(
-                        $"[scribe-diag] Member {memberIdx}: BrepBrep returned 0 curves " +
-                        $"({pts?.Length ?? 0} points).");
-                    continue;
-                }
-
-                Rhino.RhinoApp.WriteLine(
-                    $"[scribe-diag] Member {memberIdx}: BrepBrep returned {curves.Length} curve(s).");
+                    out Curve[] curves, out _);
+                if (!ok || curves == null) continue;
 
                 foreach (var c in curves)
                 {
@@ -500,18 +452,14 @@ namespace SeaNest.RhinoAdapters
                     // 3D length filter: drop tangent-contact zero-or-near-zero
                     // length curves before doing the (relatively expensive)
                     // projection.
-                    if (c.GetLength() < minLength)
-                    {
-                        lengthFiltered++;
-                        continue;
-                    }
+                    if (c.GetLength() < minLength) continue;
 
                     // Phase 19b.0.3: project to the chosen flatten plane
                     // unconditionally. Intersection curves between plate and
                     // member lie on the plate's faces (inside, outside, or
                     // side strips) — not on the chosen flatten plane (which
                     // sits at the twin-pair average, half a thickness off
-                    // each face). The earlier coplanarity filter rejected
+                    // each face). An earlier coplanarity filter rejected
                     // these as non-coplanar; that was the wrong predicate.
                     // ProjectCurveToPlaneSpace gives the curve's orthographic
                     // 2D shadow on the flatten plane, which IS the scribe
@@ -524,14 +472,10 @@ namespace SeaNest.RhinoAdapters
                     // oblique crossings project to a pair offset by
                     // ~thickness × tan(angle). Operators treat coincident or
                     // near-coincident scribes as one mark — standard marine
-                    // practice. Dedup is deferred to Phase 19b.0.5 only if a
-                    // real workflow needs it.
+                    // practice. Dedup is deferred until a real workflow
+                    // needs it.
                     var projected = ProjectCurveToPlaneSpace(c, facePlane, modelTol);
-                    if (projected == null)
-                    {
-                        projectionFailed++;
-                        continue;
-                    }
+                    if (projected == null) continue;
 
                     // Post-projection length filter: side-strip curves
                     // (frame passing through the plate's vertical edge
@@ -540,23 +484,11 @@ namespace SeaNest.RhinoAdapters
                     // (the side strip is perpendicular to that plane). Same
                     // 10×modelTol threshold; we want the projected scribe
                     // to be a real visible mark, not a point artifact.
-                    if (projected.GetLength() < minLength)
-                    {
-                        projectedTooShort++;
-                        continue;
-                    }
+                    if (projected.GetLength() < minLength) continue;
 
                     scribeLinesOut.Add(projected);
-                    scribesEmitted++;
                 }
             }
-
-            Rhino.RhinoApp.WriteLine(
-                $"[scribe-diag] EmitScribeLines summary: " +
-                $"bbox-rejected={bboxRejected}, brepBrep-failed={brepBrepFailed}, " +
-                $"empty-result={emptyResult}, length-filtered={lengthFiltered}, " +
-                $"projection-failed={projectionFailed}, projected-too-short={projectedTooShort}, " +
-                $"emitted={scribesEmitted}.");
         }
 
         // ------------------------------------------------------------------

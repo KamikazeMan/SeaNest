@@ -230,11 +230,6 @@ namespace SeaNest.Commands
                     "(plates can't scribe themselves).");
             }
 
-            // Phase 19b.0.1 temporary diagnostic — verifies the fix populates
-            // memberBreps. Tagged [scribe-diag] for easy strip in Phase 19b.0.2.
-            RhinoApp.WriteLine(
-                $"[scribe-diag] memberBreps populated with {memberBreps.Count} member(s) after selection.");
-
             // Wire the squish warning so users see which parts came through Squish
             // (and will therefore have approximate dimensions). Single writer:
             // surface every message to the user AND tally Squish hits in one place.
@@ -502,9 +497,10 @@ namespace SeaNest.Commands
 
             // Phase 19b — SeaNest_Scribe layer created lazily on first scribe
             // emission, so runs without scribe sources don't pollute the layer
-            // panel with an empty SeaNest_Scribe layer. Cyan to stay distinct
-            // from black-cut and magenta-label in Rhino viewport; the cutter
-            // operator filters by layer name not color when routing toolpaths.
+            // panel with an empty SeaNest_Scribe layer. Blue (#0000FF) to stay
+            // distinct from black-cut and magenta-label in Rhino viewport; the
+            // cutter operator filters by layer name not color when routing
+            // toolpaths.
             int layerScribeIdx = -1;
             ObjectAttributes scribeAttrs = null;
 
@@ -623,7 +619,7 @@ namespace SeaNest.Commands
                     {
                         if (layerScribeIdx < 0)
                         {
-                            layerScribeIdx = EnsureLayer(doc, SeaNestLayers.Scribe, System.Drawing.Color.Cyan);
+                            layerScribeIdx = EnsureLayer(doc, SeaNestLayers.Scribe, System.Drawing.Color.Blue);
                             scribeAttrs = new ObjectAttributes { LayerIndex = layerScribeIdx };
                         }
                         foreach (var scribe in scribes)
