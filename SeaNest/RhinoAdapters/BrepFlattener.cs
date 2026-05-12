@@ -105,6 +105,39 @@ namespace SeaNest.RhinoAdapters
         private const double FaceAreaFloorRelative = 0.10;
 
         /// <summary>
+        /// Phase 14.1.2 twin-face plate detection: maximum angle between a
+        /// face-pair's normals to count as "anti-parallel," expressed as the
+        /// cosine of the threshold for direct comparison against the unit-
+        /// normal dot product. cos(10°) ≈ 0.9848 → two faces are anti-parallel
+        /// within 10° iff <c>dot(n_i, n_j) ≤ -0.9848</c>. 10° gives enough
+        /// slack for moderate plate-face curvature (each face's center-point
+        /// normal tilted up to 5° from the "average" direction) while still
+        /// firmly rejecting perpendicular faces, plate edge-strips, etc.
+        /// </summary>
+        private const double TwinAntiparallelCosThreshold = 0.9848;   // cos(10°)
+
+        /// <summary>
+        /// Phase 14.1.2 twin-face plate detection: minimum ratio of smaller-
+        /// face-area to larger-face-area for a pair to qualify as a plate
+        /// twin. Plate top/bottom should be near-equal in area; allowing
+        /// down to 0.7 tolerates slight curvature/trim differences but
+        /// firmly rejects an edge strip (area ratio ~0.01) being mis-paired
+        /// with a plate face.
+        /// </summary>
+        private const double TwinAreaRatioMin = 0.7;
+
+        /// <summary>
+        /// Phase 14.1.2 twin-face plate detection: maximum ratio of
+        /// perpendicular face-to-face separation to the larger of the two
+        /// faces' bounding-box diagonals. Plates are wide and thin: a 200"
+        /// plate at 0.25" thick has ratio ≈ 0.001; a 6"-cube has ratio
+        /// ≈ 0.16, so the cube's "twin" face pairs correctly fail this test.
+        /// 0.1 is the rough boundary between "thin enough to be a plate"
+        /// and "too thick to be a plate."
+        /// </summary>
+        private const double TwinSeparationRatioMax = 0.1;
+
+        /// <summary>
         /// Callback invoked when a part was flattened using Squish. Used by the command layer
         /// to inform the user that dimensions may be approximate for curved parts.
         /// </summary>
@@ -159,11 +192,28 @@ namespace SeaNest.RhinoAdapters
             double discretizeTol = modelTol * DiscretizationToleranceFactor;
             double angleTolRad = RhinoMath.ToRadians(UnrollAngleToleranceDegrees);
 
-            // Step 1: Thickened plate — largest coplanar face region.
-            var plateFace = FindLargestPlanarFace(brep, modelTol);
+            // Step 1: Thickened plate — twin-face topology first, then fall
+            // back to largest-planar-face selection. Phase 14.1.2: twin-pair
+            // detection identifies plates by structure (anti-parallel similar-
+            // area faces with small separation) and handles slightly-curved
+            // plate faces that fail any practical planarity tolerance. Falls
+            // back to FindLargestPlanarFace for single-surface inputs, non-
+            // plate solids, and other non-twin cases.
+            BrepFace plateFace;
+            Plane? projectionPlane = null;
+            var twinResult = FindTwinPlateFace(brep, modelTol);
+            if (twinResult != null)
+            {
+                plateFace = twinResult.Value.Face;
+                projectionPlane = twinResult.Value.Plane;
+            }
+            else
+            {
+                plateFace = FindLargestPlanarFace(brep, modelTol);
+            }
             if (plateFace != null)
             {
-                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, modelTol * PlanarityToleranceFactor, out outerCurve, innerLoops);
+                var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, modelTol * PlanarityToleranceFactor, projectionPlane, out outerCurve, innerLoops);
                 if (poly != null)
                 {
                     // Phase 14 (TEMPORARY): outer-loop-after-extraction log.
@@ -345,18 +395,147 @@ namespace SeaNest.RhinoAdapters
             return best;
         }
 
-        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, double planarityTol, out Curve outerCurveOut, List<Curve> innerLoopsOut)
+        /// <summary>
+        /// Phase 14.1.2: detect a plate via twin-face topology rather than
+        /// planarity. Returns the larger-area face of the anti-parallel
+        /// face-pair with the largest combined area, plus the average plane
+        /// between the two faces' centroids and normals — the "ideal flat
+        /// plate" projection plane that sits exactly between slightly-curved
+        /// top and bottom faces.
+        ///
+        /// Twin criteria (all three required):
+        ///   1. Normals anti-parallel within <see cref="TwinAntiparallelCosThreshold"/>
+        ///      (default ≈ 10°). Plate top/bottom face normals point in
+        ///      opposite directions.
+        ///   2. Areas similar within <see cref="TwinAreaRatioMin"/> (default
+        ///      0.7). Plate top/bottom are near-equal in area; firmly rejects
+        ///      edge-strip / plate pairs (ratio ≈ 0.01).
+        ///   3. Perpendicular separation ≤ <see cref="TwinSeparationRatioMax"/>
+        ///      × max-face-bbox-diagonal (default 0.1). Plates are wide and
+        ///      thin (ratio ≪ 0.1); cubes and chunky parts have ratio ≥ 0.16
+        ///      and are correctly rejected.
+        ///
+        /// Returns null if no qualifying pair exists — caller falls back to
+        /// <see cref="FindLargestPlanarFace"/> for surfaces, non-plate solids,
+        /// or extreme plate geometries (heavy taper, asymmetric trim).
+        /// </summary>
+        private static (BrepFace Face, Plane Plane)? FindTwinPlateFace(Brep brep, double tolerance)
+        {
+            // Inventory: gather (face, centroid, unit-normal, area, max-dim)
+            // for every face that survives DuplicateFace + AreaMassProperties.
+            // Centroid is area-weighted (AreaMassProperties.Centroid); normal
+            // is the surface normal at the parameter-space center, sufficient
+            // for near-planar plate faces (curvature ≪ 90°). Max-dim is the
+            // face bbox diagonal — orientation-agnostic single scalar.
+            var inventory = new List<(BrepFace face, Point3d centroid, Vector3d normal, double area, double maxDim)>();
+            foreach (var face in brep.Faces)
+            {
+                var faceBrep = face.DuplicateFace(false);
+                if (faceBrep == null) continue;
+                var amp = AreaMassProperties.Compute(faceBrep);
+                if (amp == null) continue;
+
+                double uMid = face.Domain(0).Mid;
+                double vMid = face.Domain(1).Mid;
+                var normal = face.NormalAt(uMid, vMid);
+                if (!normal.Unitize()) continue;   // degenerate face
+
+                var bb = faceBrep.GetBoundingBox(true);
+                double maxDim = bb.Diagonal.Length;
+                if (maxDim <= 0) continue;
+
+                inventory.Add((face, amp.Centroid, normal, amp.Area, maxDim));
+            }
+
+            if (inventory.Count < 2) return null;
+
+            // Pairing pass: O(n²) over inventory. Track the best (largest
+            // combined area) pair that satisfies all three twin criteria.
+            BrepFace bestFace = null;
+            Plane bestPlane = Plane.Unset;
+            double bestCombinedArea = -1;
+            int bestI = -1, bestJ = -1;
+
+            for (int i = 0; i < inventory.Count; i++)
+            {
+                var a = inventory[i];
+                for (int j = i + 1; j < inventory.Count; j++)
+                {
+                    var b = inventory[j];
+
+                    // 1. Anti-parallel: dot of unit normals ≤ −cos(10°).
+                    double dot = a.normal * b.normal;
+                    if (dot > -TwinAntiparallelCosThreshold) continue;
+
+                    // 2. Area similarity: min/max ≥ 0.7.
+                    double minA = Math.Min(a.area, b.area);
+                    double maxA = Math.Max(a.area, b.area);
+                    if (maxA <= 0 || (minA / maxA) < TwinAreaRatioMin) continue;
+
+                    // 3. Perpendicular separation ≤ 0.1 × max-face-dim.
+                    var delta = b.centroid - a.centroid;
+                    double sep = Math.Abs(delta * a.normal);
+                    double maxDim = Math.Max(a.maxDim, b.maxDim);
+                    if (maxDim <= 0 || (sep / maxDim) > TwinSeparationRatioMax) continue;
+
+                    double combined = a.area + b.area;
+                    if (combined > bestCombinedArea)
+                    {
+                        // Pick the larger-area face of the pair; either is
+                        // geometrically equivalent for plate extraction
+                        // since the projection plane is the average.
+                        bestFace = (a.area >= b.area) ? a.face : b.face;
+                        bestCombinedArea = combined;
+                        bestI = i;
+                        bestJ = j;
+
+                        // Average plane: origin = midpoint of centroids,
+                        // normal = (a.normal − b.normal) / 2 (since
+                        // b.normal ≈ −a.normal, this averages to ≈ a.normal
+                        // with small misalignments cancelled out).
+                        var midOrigin = new Point3d(
+                            (a.centroid.X + b.centroid.X) * 0.5,
+                            (a.centroid.Y + b.centroid.Y) * 0.5,
+                            (a.centroid.Z + b.centroid.Z) * 0.5);
+                        var avgNormal = a.normal - b.normal;
+                        if (!avgNormal.Unitize()) continue;
+                        bestPlane = new Plane(midOrigin, avgNormal);
+                    }
+                }
+            }
+
+            if (bestFace == null)
+            {
+                RhinoApp.WriteLine("  No twin plate pair detected; falling back to FindLargestPlanarFace.");
+                return null;
+            }
+
+            RhinoApp.WriteLine(
+                $"  Twin pair found: faces {inventory[bestI].face.FaceIndex},{inventory[bestJ].face.FaceIndex}, " +
+                $"combined area = {bestCombinedArea:F2}, " +
+                $"avg plane normal = ({bestPlane.Normal.X:F3},{bestPlane.Normal.Y:F3},{bestPlane.Normal.Z:F3}).");
+            return (bestFace, bestPlane);
+        }
+
+        private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, double planarityTol, Plane? overridePlane, out Curve outerCurveOut, List<Curve> innerLoopsOut)
         {
             outerCurveOut = null;
 
-            // Phase 14.1.1: use the loosened planarity tolerance for plane
-            // extraction. The face passed FindLargestPlanarFace's
-            // IsPlanar(planarityTol) check; the parameterless TryGetPlane
-            // overload defaults to RhinoMath.ZeroTolerance which would
-            // re-reject it. Match the tolerance used in selection so
-            // anything Step 1 accepts is extractable here.
+            // Phase 14.1.2: prefer caller-supplied plane when available — the
+            // twin-face path computes an average plane between two anti-parallel
+            // plate faces and passes it in here, bypassing TryGetPlane on a
+            // face that may be more curved than any planarity tolerance would
+            // accept. When overridePlane is null (single-surface / fallback
+            // path), fall back to Phase 14.1.1's loosened-tolerance plane fit.
             Plane facePlane;
-            if (!face.TryGetPlane(out facePlane, planarityTol)) return null;
+            if (overridePlane.HasValue)
+            {
+                facePlane = overridePlane.Value;
+            }
+            else
+            {
+                if (!face.TryGetPlane(out facePlane, planarityTol)) return null;
+            }
 
             var faceBrep = face.DuplicateFace(false);
             if (faceBrep == null) return null;
