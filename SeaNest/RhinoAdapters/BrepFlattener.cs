@@ -207,14 +207,22 @@ namespace SeaNest.RhinoAdapters
             RhinoApp.WriteLine(
                 $"Part flatten path: source Brep bbox=({srcW:F2}×{srcH:F2}×{srcD:F2}), diag={srcDiag:F2}");
 
-            // Step 1: Thickened plate — twin-face topology first, then fall
-            // back to largest-planar-face selection. Phase 14.1.2: twin-pair
-            // detection identifies plates by structure (anti-parallel similar-
-            // area faces with small separation) and handles slightly-curved
-            // plate faces that fail any practical planarity tolerance. Falls
-            // back to FindLargestPlanarFace for single-surface inputs, non-
-            // plate solids, and other non-twin cases.
-            BrepFace plateFace;
+            // Step 1: thickened-plate face selection. Phase 14.1.2 chose
+            // twin-pair detection (anti-parallel similar-area faces) for
+            // solid Breps, with FindLargestPlanarFace as the fallback for
+            // single-surface inputs. Phase 16.1 partitions the fallback by
+            // brep.IsSolid: solid Breps with no twin pair skip the
+            // largest-planar fallback entirely and fall through to Step 3
+            // (Unroller). This handles heavily-curved plate solids whose
+            // top/bottom face normals diverge beyond the twin threshold —
+            // largest-planar previously picked tiny edge-strip faces
+            // (areas ~10-100 sq.in. on a ~7000 sq.in. plate) and produced
+            // wrong-face sliver polygons. Unroller correctly unrolls the
+            // developable skin to a flat pattern. Non-solid inputs
+            // (single-surface, open Breps) keep the existing fallback
+            // because largest-planar is the only selection signal
+            // available without a closed-volume topology.
+            BrepFace plateFace = null;
             Plane? projectionPlane = null;
             var twinResult = FindTwinPlateFace(brep, modelTol);
             if (twinResult != null)
@@ -230,6 +238,13 @@ namespace SeaNest.RhinoAdapters
                     $"selected face {plateFace.FaceIndex} area={srcAreaEstimate:F2}, " +
                     $"avg plane normal=({n.X:F3},{n.Y:F3},{n.Z:F3})");
             }
+            else if (brep.IsSolid)
+            {
+                // Phase 16.1: solid Brep with no twin — curvature exceeded
+                // the twin threshold. Don't fall back to largest-planar
+                // (which picks edge strips); let Step 3 Unroll the skin.
+                RhinoApp.WriteLine("  Step 1a skipped: solid Brep with no twin — falling through to Step 3.");
+            }
             else
             {
                 plateFace = FindLargestPlanarFace(brep, modelTol);
@@ -239,11 +254,11 @@ namespace SeaNest.RhinoAdapters
                     var ampSel = AreaMassProperties.Compute(plateFace.DuplicateFace(false));
                     srcAreaEstimate = ampSel?.Area ?? -1;
                     RhinoApp.WriteLine(
-                        $"  Step 1a fallback (no twin): largest planar face={plateFace.FaceIndex} area={srcAreaEstimate:F2}");
+                        $"  Step 1a fallback (no twin, non-solid): largest planar face={plateFace.FaceIndex} area={srcAreaEstimate:F2}");
                 }
                 else
                 {
-                    RhinoApp.WriteLine("  Step 1a: no twin and no planar face — Step 1 will not run.");
+                    RhinoApp.WriteLine("  Step 1a: no twin and no planar face (non-solid) — Step 1 will not run.");
                 }
             }
             if (plateFace != null)
