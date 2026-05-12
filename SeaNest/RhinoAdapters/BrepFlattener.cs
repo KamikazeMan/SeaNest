@@ -214,22 +214,7 @@ namespace SeaNest.RhinoAdapters
             if (plateFace != null)
             {
                 var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, modelTol * PlanarityToleranceFactor, projectionPlane, out outerCurve, innerLoops);
-                if (poly != null)
-                {
-                    // Phase 14 (TEMPORARY): outer-loop-after-extraction log.
-                    // Vertex count is post-CurveToPolygonOnPlane (still pre-
-                    // SimplifyToTarget); bbox is in the face plane's UV frame.
-                    var pbb = poly.BoundingBox;
-                    RhinoApp.WriteLine(
-                        $"  Outer loop after extraction: {poly.Count} verts, " +
-                        $"bbox={pbb.MaxX - pbb.MinX:F2}×{pbb.MaxY - pbb.MinY:F2} (UV frame)");
-                    return poly;
-                }
-                // Phase 14 (TEMPORARY): FaceToPolygon rejected the selected face.
-                RhinoApp.WriteLine(
-                    $"  FaceToPolygon returned null for face {plateFace.FaceIndex} " +
-                    "(TryGetPlane parameterless overload or outer-loop extraction failed); " +
-                    "falling through to Step 2.");
+                if (poly != null) return poly;
                 outerCurve = null;
                 innerLoops.Clear();
             }
@@ -308,13 +293,6 @@ namespace SeaNest.RhinoAdapters
             BrepFace best = null;
             double bestArea = -1;
 
-            // Phase 14 (TEMPORARY): inventory the brep's faces so we can see
-            // exactly which face is winning the area race for thick-vs-thin
-            // versions of the same part. Compares per-face area, bbox, outer-
-            // loop vertex count, and whether IsPlanar + TryGetPlane(tolerance)
-            // both succeed (the actual selection criteria).
-            RhinoApp.WriteLine($"BrepFlattener input: brep face count = {brep.Faces.Count}");
-
             // Phase 14.1 first pass: collect every face that survives the
             // (loosened) planarity, plane-fit, duplicate-face, and area-mass
             // checks. We need all of them before applying the relative
@@ -323,47 +301,16 @@ namespace SeaNest.RhinoAdapters
 
             foreach (var face in brep.Faces)
             {
-                bool isPlanar = face.IsPlanar(planarityTol);
+                if (!face.IsPlanar(planarityTol)) continue;
                 Plane plane;
-                bool planeOk = isPlanar && face.TryGetPlane(out plane, planarityTol);
+                if (!face.TryGetPlane(out plane, planarityTol)) continue;
 
                 var faceBrep = face.DuplicateFace(false);
-                var amp = (faceBrep != null) ? AreaMassProperties.Compute(faceBrep) : null;
-                double area = amp?.Area ?? 0.0;
-
-                // Phase 14 diagnostic: per-face report. bbox is in 3D world units,
-                // outerLoopVerts is polyline count if the loop is a polyline else
-                // NurbsCurve.Points.Count else -1.
-                string bboxStr = "n/a";
-                int outerLoopVerts = -1;
-                if (faceBrep != null)
-                {
-                    var bb = faceBrep.GetBoundingBox(true);
-                    bboxStr = $"{bb.Max.X - bb.Min.X:F2}×{bb.Max.Y - bb.Min.Y:F2}×{bb.Max.Z - bb.Min.Z:F2}";
-                    foreach (var loop in faceBrep.Loops)
-                    {
-                        if (loop.LoopType == BrepLoopType.Outer)
-                        {
-                            var crv = loop.To3dCurve();
-                            if (crv != null)
-                            {
-                                if (crv.TryGetPolyline(out var pl)) outerLoopVerts = pl.Count;
-                                else if (crv is NurbsCurve nc) outerLoopVerts = nc.Points.Count;
-                            }
-                            break;
-                        }
-                    }
-                }
-                RhinoApp.WriteLine(
-                    $"  Face {face.FaceIndex}: planar={isPlanar}, planeOk={planeOk}, " +
-                    $"area={area:F2}, bbox={bboxStr}, outer loop verts={outerLoopVerts}");
-
-                if (!isPlanar) continue;
-                if (!planeOk) continue;
                 if (faceBrep == null) continue;
+                var amp = AreaMassProperties.Compute(faceBrep);
                 if (amp == null) continue;
 
-                candidates.Add((face, area));
+                candidates.Add((face, amp.Area));
             }
 
             // Phase 14.1 second pass: apply the area-floor relative to the
@@ -385,12 +332,6 @@ namespace SeaNest.RhinoAdapters
                     }
                 }
             }
-
-            // Phase 14 (TEMPORARY): selection summary.
-            if (best != null)
-                RhinoApp.WriteLine($"  Selected face index {best.FaceIndex} (largest planar area = {bestArea:F2}).");
-            else
-                RhinoApp.WriteLine("  No planar face selected — falling through to Step 2.");
 
             return best;
         }
@@ -454,7 +395,6 @@ namespace SeaNest.RhinoAdapters
             BrepFace bestFace = null;
             Plane bestPlane = Plane.Unset;
             double bestCombinedArea = -1;
-            int bestI = -1, bestJ = -1;
 
             for (int i = 0; i < inventory.Count; i++)
             {
@@ -486,8 +426,6 @@ namespace SeaNest.RhinoAdapters
                         // since the projection plane is the average.
                         bestFace = (a.area >= b.area) ? a.face : b.face;
                         bestCombinedArea = combined;
-                        bestI = i;
-                        bestJ = j;
 
                         // Average plane: origin = midpoint of centroids,
                         // normal = (a.normal − b.normal) / 2 (since
@@ -504,16 +442,7 @@ namespace SeaNest.RhinoAdapters
                 }
             }
 
-            if (bestFace == null)
-            {
-                RhinoApp.WriteLine("  No twin plate pair detected; falling back to FindLargestPlanarFace.");
-                return null;
-            }
-
-            RhinoApp.WriteLine(
-                $"  Twin pair found: faces {inventory[bestI].face.FaceIndex},{inventory[bestJ].face.FaceIndex}, " +
-                $"combined area = {bestCombinedArea:F2}, " +
-                $"avg plane normal = ({bestPlane.Normal.X:F3},{bestPlane.Normal.Y:F3},{bestPlane.Normal.Z:F3}).");
+            if (bestFace == null) return null;
             return (bestFace, bestPlane);
         }
 
