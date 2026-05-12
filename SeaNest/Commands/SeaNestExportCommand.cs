@@ -15,11 +15,12 @@ using SaveFileDialog = Eto.Forms.SaveFileDialog;
 namespace SeaNest.Commands
 {
     // Phase 17 — export the nested output (SeaNest_Nested curves +
-    // SeaNest_Labels text) to a DXF/DWG file for plate cutters.
+    // SeaNest_Sheets outlines + SeaNest_Labels text) to a DXF/DWG file
+    // for plate cutters.
     //
-    // Sheet outlines (SeaNest_Sheets) are intentionally excluded: operators
-    // know sheet size from the nesting prompt and do not need it in the cut
-    // file. If that changes, add SeaNestLayers.Sheets to LayerNames below.
+    // All three SeaNest layers are exported. Operators filter at the cutter:
+    // turn off SeaNest_Sheets to avoid cutting sheet outlines, turn off
+    // SeaNest_Labels to skip text etching, etc.
     //
     // Strategy: pre-select the objects on the target layers, then call
     // RhinoDoc.WriteFile with WriteSelectedObjectsOnly + SuppressDialogBoxes.
@@ -33,6 +34,7 @@ namespace SeaNest.Commands
         private static readonly string[] LayerNames =
         {
             SeaNestLayers.Nested,
+            SeaNestLayers.Sheets,
             SeaNestLayers.Labels,
         };
 
