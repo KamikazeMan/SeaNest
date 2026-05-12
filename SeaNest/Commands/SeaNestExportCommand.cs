@@ -10,6 +10,7 @@ using Rhino.UI;
 using RhinoCommand = Rhino.Commands.Command;
 using Result = Rhino.Commands.Result;
 using RunMode = Rhino.Commands.RunMode;
+using SaveFileDialog = Eto.Forms.SaveFileDialog;
 
 namespace SeaNest.Commands
 {
