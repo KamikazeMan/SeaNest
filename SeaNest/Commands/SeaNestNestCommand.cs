@@ -429,10 +429,8 @@ namespace SeaNest.Commands
                 }
             }
 
-            int placementIndex = -1;
             foreach (var pp in response.Placements)
             {
-                placementIndex++;
                 double yOffset = pp.Sheet * sheetStride;
 
                 // Phase 9a — outer-draw branch. Two paths, both correctly placed:
@@ -457,60 +455,17 @@ namespace SeaNest.Commands
                 // and both feed into the same per-sheet stacking and global
                 // 90°-Z rotation, so downstream code sees no difference.
                 Curve partCurve;
-                Curve sourceOuterForDiag = null;
-                bool usedOuterCurve;
                 if (outerCurvePerPart != null
                     && pp.OriginalIndex < outerCurvePerPart.Count
                     && outerCurvePerPart[pp.OriginalIndex] != null)
                 {
-                    sourceOuterForDiag = outerCurvePerPart[pp.OriginalIndex];
                     partCurve = PolygonToCurve.ToCurveFromOriginal(
                         outerCurvePerPart[pp.OriginalIndex], pp, yOffset);
-                    usedOuterCurve = true;
                 }
                 else
                 {
                     partCurve = PolygonToCurve.ToCurve(pp.PlacedPolygon, yOffset);
-                    usedOuterCurve = false;
                 }
-
-                // Phase 15 (TEMPORARY): trace what each placement is actually
-                // drawing for the NFP_Annealed-vs-NFP_Greedy comparison. Key
-                // signal is Z-extent on partCurve — any non-zero Z range means
-                // we're emitting 3D geometry where flat 2D output is expected.
-                // Captures placement metadata, the source outer curve (if any)
-                // before the rigid-transform application, and the final
-                // post-transform curve.
-                var ppBox = pp.PlacedPolygon.BoundingBox;
-                string outerInBboxStr;
-                if (sourceOuterForDiag != null)
-                {
-                    var sbb = sourceOuterForDiag.GetBoundingBox(true);
-                    outerInBboxStr = $"3D bbox=({sbb.Max.X - sbb.Min.X:F2}×{sbb.Max.Y - sbb.Min.Y:F2}×{sbb.Max.Z - sbb.Min.Z:F2}), Z-extent=({sbb.Min.Z:F4},{sbb.Max.Z:F4}), type={sourceOuterForDiag.GetType().Name}";
-                }
-                else
-                {
-                    outerInBboxStr = "(null)";
-                }
-                string partOutBboxStr;
-                if (partCurve != null)
-                {
-                    var obb = partCurve.GetBoundingBox(true);
-                    partOutBboxStr = $"3D bbox=({obb.Max.X - obb.Min.X:F2}×{obb.Max.Y - obb.Min.Y:F2}×{obb.Max.Z - obb.Min.Z:F2}), Z-extent=({obb.Min.Z:F4},{obb.Max.Z:F4}), type={partCurve.GetType().Name}";
-                }
-                else
-                {
-                    partOutBboxStr = "(null)";
-                }
-                RhinoApp.WriteLine(
-                    $"DrawNestingResult placement i={placementIndex}: " +
-                    $"OriginalIndex={pp.OriginalIndex}, Sheet={pp.Sheet}, " +
-                    $"RotationDeg={pp.RotationDeg:F1}, IsMirrored={pp.IsMirrored}, " +
-                    $"PlacedPolygon verts={pp.PlacedPolygon.Count}, " +
-                    $"PlacedPolygon bbox=({ppBox.MaxX - ppBox.MinX:F2}×{ppBox.MaxY - ppBox.MinY:F2}), " +
-                    $"usedOuterCurve={usedOuterCurve}, " +
-                    $"outerCurveIn={outerInBboxStr}, " +
-                    $"partCurveOut={partOutBboxStr}");
 
                 var partAttrs = new ObjectAttributes { LayerIndex = layerNestedIdx };
                 var partId = doc.Objects.AddCurve(partCurve, partAttrs);
