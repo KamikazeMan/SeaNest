@@ -73,11 +73,36 @@ namespace SeaNest.RhinoAdapters
         /// </summary>
         public IReadOnlyList<Curve> InnerLoops { get; }
 
-        public BrepFlattenResult(Polygon outerPolygon, Curve outerCurve, IReadOnlyList<Curve> innerLoops)
+        /// <summary>
+        /// Phase 19b — structural reference scribe lines for the plate, in the
+        /// same world-XY plane-local frame as <see cref="OuterPolygon"/>. These
+        /// are the curves where structural members (frames, longitudinals,
+        /// bulkheads) intersect the plate's cut face; they ride along with the
+        /// outer through placement (same <see cref="PolygonToCurve.ToCurveFromOriginal"/>
+        /// transform as <see cref="InnerLoops"/>) and emit on a dedicated
+        /// <c>SeaNest_Scribe</c> layer for low-power-marking / etch-tool routing
+        /// at the plate cutter. Empty list if the user didn't supply scribe
+        /// members or no intersections were found; never null.
+        ///
+        /// Currently populated for Step 1 (face-to-polygon) and Step 2
+        /// (fully-planar Brep) flatten paths only. Step 3 (Unroll) and Step 4
+        /// (Squish) emit a one-shot warning via
+        /// <see cref="BrepFlattener.ScribeWarning"/> and drop the scribes for
+        /// the affected part. Curved-plate (Unroll) support is deferred to
+        /// Phase 19b.2 via <c>Unroller.AddFollowingGeometry</c>.
+        /// </summary>
+        public IReadOnlyList<Curve> ScribeLines { get; }
+
+        public BrepFlattenResult(
+            Polygon outerPolygon,
+            Curve outerCurve,
+            IReadOnlyList<Curve> innerLoops,
+            IReadOnlyList<Curve> scribeLines = null)
         {
             OuterPolygon = outerPolygon ?? throw new ArgumentNullException(nameof(outerPolygon));
             OuterCurve = outerCurve;   // may be null — Squish path has no native source
             InnerLoops = innerLoops ?? Array.Empty<Curve>();
+            ScribeLines = scribeLines ?? Array.Empty<Curve>();
         }
     }
 }

@@ -151,9 +151,33 @@ namespace SeaNest.RhinoAdapters
         /// </summary>
         public static Action<string> SimplifyWarning { get; set; }
 
-        public static BrepFlattenResult Flatten(Brep brep, RhinoDoc doc)
+        /// <summary>
+        /// Phase 19b — callback invoked when scribe sources were supplied but the
+        /// plate's flatten path does not (yet) support scribe emission. Today
+        /// this fires for Step 3 (Unroll) and Step 4 (Squish). Wired by the
+        /// command layer to RhinoApp.WriteLine.
+        /// </summary>
+        public static Action<string> ScribeWarning { get; set; }
+
+        // Phase 19b — scribe intersection length filter. Curves shorter than
+        // ScribeLengthFilterFactor × modelTol are tangent-contact artifacts
+        // and get dropped. 10× ≈ 0.01" at 0.001" model tol — well below any
+        // intentional scribe mark.
+        private const double ScribeLengthFilterFactor = 10.0;
+
+        // Phase 19b — sample count used to verify a Brep×Brep intersection
+        // curve actually lies on the chosen plane (Step 2 has no per-face
+        // restriction so intersections may live on the plate's back face).
+        // 5 evenly-spaced parameters catches mid-curve drift the endpoints
+        // would miss.
+        private const int ScribeCoplanaritySampleCount = 5;
+
+        public static BrepFlattenResult Flatten(
+            Brep brep, RhinoDoc doc,
+            IReadOnlyList<Brep> scribeSourceBreps = null)
         {
-            var raw = FlattenRaw(brep, doc, out var outerCurve, out var innerLoops);
+            var raw = FlattenRaw(brep, doc, scribeSourceBreps,
+                out var outerCurve, out var innerLoops, out var scribeLines);
             if (raw == null) return null;
 
             // Pre-NFP simplification: collapse arc densification from
@@ -176,14 +200,21 @@ namespace SeaNest.RhinoAdapters
 
             // Outer native curve and inner loops are NOT simplified — fidelity
             // matters for cut output, they don't enter NFP, and the renderer
-            // consumes them directly.
-            return new BrepFlattenResult(simplified, outerCurve, innerLoops);
+            // consumes them directly. Scribe lines (Phase 19b) ride along on
+            // the same fidelity contract.
+            return new BrepFlattenResult(simplified, outerCurve, innerLoops, scribeLines);
         }
 
-        private static Polygon FlattenRaw(Brep brep, RhinoDoc doc, out Curve outerCurve, out List<Curve> innerLoops)
+        private static Polygon FlattenRaw(
+            Brep brep, RhinoDoc doc,
+            IReadOnlyList<Brep> scribeSourceBreps,
+            out Curve outerCurve,
+            out List<Curve> innerLoops,
+            out List<Curve> scribeLines)
         {
             outerCurve = null;
             innerLoops = new List<Curve>();
+            scribeLines = new List<Curve>();
 
             if (brep == null) throw new ArgumentNullException(nameof(brep));
             if (doc == null) throw new ArgumentNullException(nameof(doc));
@@ -229,9 +260,31 @@ namespace SeaNest.RhinoAdapters
             if (plateFace != null)
             {
                 var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, modelTol * PlanarityToleranceFactor, projectionPlane, out outerCurve, innerLoops);
-                if (poly != null) return poly;
+                if (poly != null)
+                {
+                    // Phase 19b — Step 1 scribe emission. The cut face is
+                    // known (plateFace); intersect plateFace.DuplicateFace(false)
+                    // against each member so the result curves respect the
+                    // face's trim (one BrepBrep call per member instead of
+                    // BrepSurface-then-trim). Plane is the override plane for
+                    // twin pairs (Phase 14.1.2 average plane), else the face's
+                    // own TryGetPlane result — same plane used for inner-loop
+                    // projection, so scribes land in the same source frame.
+                    Plane scribePlane = projectionPlane
+                        ?? (plateFace.TryGetPlane(out Plane facePlane, modelTol * PlanarityToleranceFactor)
+                            ? facePlane
+                            : Plane.WorldXY);
+                    using (var faceBrep = plateFace.DuplicateFace(false))
+                    {
+                        EmitScribeLines(
+                            faceBrep, scribeSourceBreps, scribePlane,
+                            requireCoplanar: false, modelTol, scribeLines);
+                    }
+                    return poly;
+                }
                 outerCurve = null;
                 innerLoops.Clear();
+                scribeLines.Clear();
             }
 
             // Step 2: Fully flat open Brep.
@@ -241,9 +294,23 @@ namespace SeaNest.RhinoAdapters
                 if (TryGetBrepPlane(brep, modelTol, out plane))
                 {
                     var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
-                    if (poly != null) return poly;
+                    if (poly != null)
+                    {
+                        // Phase 19b — Step 2 scribe emission. The cut surface
+                        // is the whole brep (no single plateFace); intersect
+                        // brep × member. The brep may have multiple faces on
+                        // the same plane — coplanarity filter keeps only the
+                        // curves on the chosen plane (drops back-face copies
+                        // for thickened sheets, side-edge curves at member
+                        // pass-through, etc.).
+                        EmitScribeLines(
+                            brep, scribeSourceBreps, plane,
+                            requireCoplanar: true, modelTol, scribeLines);
+                        return poly;
+                    }
                     outerCurve = null;
                     innerLoops.Clear();
+                    scribeLines.Clear();
                 }
             }
 
@@ -253,9 +320,28 @@ namespace SeaNest.RhinoAdapters
             if (unrolled != null)
             {
                 var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
-                if (poly != null) return poly;
+                if (poly != null)
+                {
+                    // Phase 19b — Step 3 scribe support is deferred to a
+                    // follow-up (Phase 19b.2). Correct mechanics require
+                    // Unroller.AddFollowingGeometry BEFORE PerformUnroll so
+                    // scribe curves flatten alongside the curved face; a
+                    // post-hoc ProjectCurveToPlaneSpace would compute the
+                    // scribe in 3D and then project it onto WorldXY, losing
+                    // the curvature mapping. Warn-and-drop scribes for this
+                    // plate; the cut outline still emits normally.
+                    if (scribeSourceBreps != null && scribeSourceBreps.Count > 0)
+                    {
+                        ScribeWarning?.Invoke(
+                            "Scribes not supported on Unroll-path plates yet — " +
+                            "dropped scribes for this part. (Phase 19b.2 will add support " +
+                            "via Unroller.AddFollowingGeometry.)");
+                    }
+                    return poly;
+                }
                 outerCurve = null;
                 innerLoops.Clear();
+                scribeLines.Clear();
             }
 
             // Step 4: Fallback — squish the largest face regardless of planarity.
@@ -269,13 +355,116 @@ namespace SeaNest.RhinoAdapters
                 {
                     SquishWarning?.Invoke(
                         "Squish flattening used — dimensions may be approximate for curved parts.");
+                    // Phase 19b — Step 4 scribe support deferred to Phase 19b.3.
+                    // SquishMesh has no equivalent to Unroller.AddFollowingGeometry,
+                    // so per-point mapping or a separate post-squish projection
+                    // would be required. Non-developable plates needing scribes
+                    // are rare in marine work; warn-and-drop for now.
+                    if (scribeSourceBreps != null && scribeSourceBreps.Count > 0)
+                    {
+                        ScribeWarning?.Invoke(
+                            "Scribes not supported on Squish-path plates — " +
+                            "dropped scribes for this part. (Non-developable surface.)");
+                    }
                     return poly;
                 }
                 outerCurve = null;
                 innerLoops.Clear();
+                scribeLines.Clear();
             }
 
             return null;
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 19b — scribe-line intersection helpers
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Intersect <paramref name="plateGeometry"/> with each member Brep, filter
+        /// the resulting curves by length and (optionally) coplanarity with
+        /// <paramref name="facePlane"/>, project each kept curve into the plate's
+        /// plane-local frame via <see cref="ProjectCurveToPlaneSpace"/>, and append
+        /// to <paramref name="scribeLinesOut"/>.
+        ///
+        /// <paramref name="plateGeometry"/> is either
+        /// <c>plateFace.DuplicateFace(false)</c> (Step 1, retains trim so result
+        /// is naturally clipped to the cut face) or the full plate Brep (Step 2,
+        /// where multiple faces share the same plane and a coplanarity filter is
+        /// needed to drop back-face / side-edge intersections).
+        ///
+        /// Bbox prefilter skips members that can't possibly intersect — for typical
+        /// boats (10-50 plates × 20-100 members) this trims the combinatorics by
+        /// ~80% before any BrepBrep compute. BrepBrep itself is the moderately
+        /// expensive call; bbox-rejecting non-neighbors keeps total scribe time
+        /// proportional to actual contact, not selection size.
+        /// </summary>
+        private static void EmitScribeLines(
+            Brep plateGeometry,
+            IReadOnlyList<Brep> memberBreps,
+            Plane facePlane,
+            bool requireCoplanar,
+            double modelTol,
+            List<Curve> scribeLinesOut)
+        {
+            if (plateGeometry == null) return;
+            if (memberBreps == null || memberBreps.Count == 0) return;
+
+            double minLength = modelTol * ScribeLengthFilterFactor;
+            var plateBBox = plateGeometry.GetBoundingBox(true);
+
+            foreach (var member in memberBreps)
+            {
+                if (member == null) continue;
+
+                // Bbox prefilter — skip members that can't touch this plate.
+                var memberBBox = member.GetBoundingBox(true);
+                var overlap = BoundingBox.Intersection(plateBBox, memberBBox);
+                if (!overlap.IsValid) continue;
+
+                bool ok = Rhino.Geometry.Intersect.Intersection.BrepBrep(
+                    plateGeometry, member, modelTol,
+                    out Curve[] curves, out _);
+                if (!ok || curves == null) continue;
+
+                foreach (var c in curves)
+                {
+                    if (c == null) continue;
+
+                    // Length filter: drop tangent-contact zero-or-near-zero
+                    // length curves.
+                    if (c.GetLength() < minLength) continue;
+
+                    // Step 2 coplanarity filter: BrepBrep against a full Brep
+                    // returns curves on every face the member touches; we only
+                    // want curves on the chosen plate plane.
+                    if (requireCoplanar && !IsCurveCoplanarWithPlane(c, facePlane, modelTol))
+                        continue;
+
+                    var projected = ProjectCurveToPlaneSpace(c, facePlane, modelTol);
+                    if (projected != null) scribeLinesOut.Add(projected);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Sample a curve at <see cref="ScribeCoplanaritySampleCount"/> evenly-spaced
+        /// parameters and verify every sample lies within <paramref name="tol"/> of
+        /// <paramref name="plane"/>. Used in Step 2 to filter Brep×Brep results
+        /// down to just the curves on the chosen cut face.
+        /// </summary>
+        private static bool IsCurveCoplanarWithPlane(Curve curve, Plane plane, double tol)
+        {
+            if (curve == null) return false;
+            var domain = curve.Domain;
+            for (int i = 0; i <= ScribeCoplanaritySampleCount; i++)
+            {
+                double t = domain.T0 +
+                    (domain.T1 - domain.T0) * i / (double)ScribeCoplanaritySampleCount;
+                var pt = curve.PointAt(t);
+                if (Math.Abs(plane.DistanceTo(pt)) > tol) return false;
+            }
+            return true;
         }
 
         // ------------------------------------------------------------------

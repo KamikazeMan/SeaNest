@@ -8,5 +8,6 @@ namespace SeaNest
         public const string Nested = "SeaNest_Nested";
         public const string Sheets = "SeaNest_Sheets";
         public const string Labels = "SeaNest_Labels";
+        public const string Scribe = "SeaNest_Scribe";
     }
 }

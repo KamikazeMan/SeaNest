@@ -36,6 +36,7 @@ namespace SeaNest.Commands
             SeaNestLayers.Nested,
             SeaNestLayers.Sheets,
             SeaNestLayers.Labels,
+            SeaNestLayers.Scribe,
         };
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)

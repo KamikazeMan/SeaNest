@@ -142,6 +142,10 @@ namespace SeaNest.Commands
             // at label-emit time. The list stays aligned with `breps` so the same
             // skip-on-no-Brep semantics propagate downstream.
             var brepNames = new List<string>();
+            // Phase 19b: track plate ObjectIds so the member-selection prompt
+            // can filter out any plate the user accidentally re-picks as a
+            // scribe source (defensive against self-intersection garbage).
+            var plateObjectIds = new HashSet<Guid>();
             for (int i = 0; i < go.ObjectCount; i++)
             {
                 var obj = go.Object(i);
@@ -155,6 +159,7 @@ namespace SeaNest.Commands
                 {
                     breps.Add(brep);
                     brepNames.Add(obj.Object()?.Attributes?.Name);
+                    plateObjectIds.Add(obj.ObjectId);
                 }
             }
 
@@ -162,6 +167,62 @@ namespace SeaNest.Commands
             {
                 RhinoApp.WriteLine("No valid Breps selected.");
                 return Rhino.Commands.Result.Nothing;
+            }
+
+            // Phase 19b — structural-member selection for scribe lines. Optional:
+            // pressing Enter skips the prompt with no scribe sources, behavior
+            // identical to pre-19b. Members can be Breps, Extrusions, or
+            // single-face Surfaces (frames, longitudinals, bulkheads, brackets).
+            // EnablePreSelect(false) so any leftover pre-selection from the plate
+            // prompt isn't re-consumed here. Filter by ObjectId against
+            // plateObjectIds so a user who fat-fingers a plate into the member
+            // selection doesn't get self-intersection garbage.
+            var memberBreps = new List<Brep>();
+            var goMembers = new GetObject();
+            goMembers.SetCommandPrompt("Select structural members for scribe lines (press Enter to skip)");
+            goMembers.GeometryFilter = ObjectType.Brep | ObjectType.Extrusion | ObjectType.Surface;
+            goMembers.GroupSelect = true;
+            goMembers.SubObjectSelect = false;
+            goMembers.AcceptNothing(true);
+            goMembers.EnablePreSelect(false, true);
+            var memberResult = goMembers.GetMultiple(0, 0);
+            // GetResult.Nothing == user pressed Enter (no scribe sources, proceed).
+            // GetResult.Object == one or more members picked. Anything else =
+            // cancel or error → abort the whole command.
+            if (memberResult == GetResult.Object)
+            {
+                int selfPickedCount = 0;
+                for (int i = 0; i < goMembers.ObjectCount; i++)
+                {
+                    var obj = goMembers.Object(i);
+                    if (plateObjectIds.Contains(obj.ObjectId))
+                    {
+                        selfPickedCount++;
+                        continue;
+                    }
+                    var mbrep = obj.Brep();
+                    if (mbrep == null)
+                    {
+                        var ext = obj.Geometry() as Extrusion;
+                        if (ext != null) mbrep = ext.ToBrep();
+                    }
+                    if (mbrep == null)
+                    {
+                        var srf = obj.Geometry() as Surface;
+                        if (srf != null) mbrep = Brep.CreateFromSurface(srf);
+                    }
+                    if (mbrep != null) memberBreps.Add(mbrep);
+                }
+                if (selfPickedCount > 0)
+                {
+                    RhinoApp.WriteLine(
+                        $"{selfPickedCount} plate(s) re-picked as scribe members — filtered out " +
+                        "(plates can't scribe themselves).");
+                }
+            }
+            else if (memberResult != GetResult.Nothing)
+            {
+                return Rhino.Commands.Result.Cancel;
             }
 
             // Wire the squish warning so users see which parts came through Squish
@@ -183,6 +244,17 @@ namespace SeaNest.Commands
                 if (msg != null) RhinoApp.WriteLine(msg);
             };
 
+            // Phase 19b: surface scribe warnings (Step 3 Unroll / Step 4 Squish
+            // dropped scribes) to the user and tally how many parts dropped
+            // scribes — single end-of-command summary line below.
+            int scribeDroppedCount = 0;
+            BrepFlattener.ScribeWarning = msg =>
+            {
+                if (msg == null) return;
+                RhinoApp.WriteLine(msg);
+                scribeDroppedCount++;
+            };
+
             var polygons = new List<Polygon>();
             // Phase 7b: parallel per-part inner-loop table indexed by polygons[i].
             // Bypasses the nesting engine entirely; consumed only at draw time.
@@ -193,9 +265,13 @@ namespace SeaNest.Commands
             var outerCurvePerPart = new List<Curve>();
             // Phase 8: parallel per-part Name table, same alignment convention.
             var namesPerPart = new List<string>();
+            // Phase 19b: parallel per-part scribe-line table. Emitted on the
+            // SeaNest_Scribe layer at draw time; transformed alongside the
+            // outer via the same PlacementResult.Transform.
+            var scribeLinesPerPart = new List<IReadOnlyList<Curve>>();
             for (int i = 0; i < breps.Count; i++)
             {
-                var flat = BrepFlattener.Flatten(breps[i], doc);
+                var flat = BrepFlattener.Flatten(breps[i], doc, memberBreps);
                 if (flat == null)
                 {
                     RhinoApp.WriteLine(
@@ -208,15 +284,18 @@ namespace SeaNest.Commands
                     var polygon = flat.OuterPolygon;
                     var innerLoops = flat.InnerLoops;
                     var outerCurve = flat.OuterCurve;
+                    // Phase 19b: scribe lines ride along with the outer through
+                    // every transform the engine applies, just like inner loops.
+                    var scribeLines = flat.ScribeLines;
 
                     // Phase 13: auto-align elongated parts so the principal axis
                     // points along world +X before the engine ingests them. All
-                    // three of (polygon, inner loops, outer curve) are rotated
-                    // by the same angle around the same pivot (the polygon's
-                    // centroid, captured once before rotation since it's
-                    // rotation-invariant about itself) so they stay in lockstep.
-                    // Skip for near-square parts (PCA unstable) and for
-                    // already-aligned parts (avoids float churn).
+                    // four of (polygon, inner loops, outer curve, scribe lines)
+                    // are rotated by the same angle around the same pivot (the
+                    // polygon's centroid, captured once before rotation since
+                    // it's rotation-invariant about itself) so they stay in
+                    // lockstep. Skip for near-square parts (PCA unstable) and
+                    // for already-aligned parts (avoids float churn).
                     if (polygon.AspectRatio > AutoAlignAspectThreshold)
                     {
                         double alignAngle = -polygon.PrincipalAxisAngle;
@@ -256,6 +335,21 @@ namespace SeaNest.Commands
                                                           // polygon-rendered outer
                                                           // at draw time.
                             }
+
+                            if (scribeLines != null && scribeLines.Count > 0)
+                            {
+                                var rotatedScribes = new List<Curve>(scribeLines.Count);
+                                foreach (var s in scribeLines)
+                                {
+                                    var dup = s.DuplicateCurve();
+                                    if (dup != null && dup.Transform(rotationXform))
+                                        rotatedScribes.Add(dup);
+                                    // else: drop this scribe; rest of the part
+                                    // continues. Same graceful-local-degradation
+                                    // policy as inner loops.
+                                }
+                                scribeLines = rotatedScribes;
+                            }
                         }
                     }
 
@@ -263,6 +357,7 @@ namespace SeaNest.Commands
                     innerLoopsPerPart.Add(innerLoops);
                     outerCurvePerPart.Add(outerCurve);
                     namesPerPart.Add(brepNames[i]);
+                    scribeLinesPerPart.Add(scribeLines);
                 }
             }
 
@@ -270,6 +365,12 @@ namespace SeaNest.Commands
             {
                 RhinoApp.WriteLine(
                     $"Note: {squishedCount} part(s) used Squish flattening — dimensions may be approximate for curved parts.");
+            }
+
+            if (scribeDroppedCount > 0)
+            {
+                RhinoApp.WriteLine(
+                    $"Note: scribes dropped for {scribeDroppedCount} part(s) on Unroll/Squish paths (see warnings above).");
             }
 
             if (polygons.Count == 0)
@@ -341,7 +442,10 @@ namespace SeaNest.Commands
                 return Rhino.Commands.Result.Nothing;
             }
 
-            DrawNestingResult(doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric, innerLoopsPerPart, namesPerPart, outerCurvePerPart);
+            DrawNestingResult(
+                doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric,
+                innerLoopsPerPart, namesPerPart, outerCurvePerPart,
+                scribeLinesPerPart: scribeLinesPerPart);
 
             int mirrored = response.Placements.Count(p => p.IsMirrored);
             string mirrorNote = mirrored > 0 ? $", {mirrored} mirrored" : "";
@@ -370,7 +474,8 @@ namespace SeaNest.Commands
             double margin, double inToModel, bool isMetric,
             IReadOnlyList<IReadOnlyList<Curve>> innerLoopsPerPart = null,
             IReadOnlyList<string> namesPerPart = null,
-            IReadOnlyList<Curve> outerCurvePerPart = null)
+            IReadOnlyList<Curve> outerCurvePerPart = null,
+            IReadOnlyList<IReadOnlyList<Curve>> scribeLinesPerPart = null)
         {
             // Phase 8: SLF-RHN Architect font lookup, plus a one-per-command
             // warning if the font isn't available (Rhino bundles it, but a
@@ -384,6 +489,14 @@ namespace SeaNest.Commands
             int layerLabelsIdx = EnsureLayer(doc, SeaNestLayers.Labels, System.Drawing.Color.Magenta);
             int dimStyleIdx = EnsureDimStyle(doc, DimStyleName);
             var dimStyle = doc.DimStyles[dimStyleIdx];
+
+            // Phase 19b — SeaNest_Scribe layer created lazily on first scribe
+            // emission, so runs without scribe sources don't pollute the layer
+            // panel with an empty SeaNest_Scribe layer. Cyan to stay distinct
+            // from black-cut and magenta-label in Rhino viewport; the cutter
+            // operator filters by layer name not color when routing toolpaths.
+            int layerScribeIdx = -1;
+            ObjectAttributes scribeAttrs = null;
 
             double labelHeight = LabelHeightIn * inToModel;
             double labelStride = labelHeight * LabelStrideFactor;
@@ -484,6 +597,30 @@ namespace SeaNest.Commands
                             var transformed = PolygonToCurve.ToCurveFromOriginal(loop, pp, yOffset);
                             var loopId = doc.Objects.AddCurve(transformed, partAttrs);
                             if (loopId != Guid.Empty) createdObjectIds.Add(loopId);
+                        }
+                    }
+                }
+
+                // Phase 19b: ride-along scribe lines (structural reference
+                // lines where frames / longitudinals / bulkheads intersect the
+                // plate). Same transform as inner loops, separate layer so
+                // the cutter operator can route them to a low-power-marking
+                // or etch toolpath. Layer created lazily on first emit.
+                if (scribeLinesPerPart != null && pp.OriginalIndex < scribeLinesPerPart.Count)
+                {
+                    var scribes = scribeLinesPerPart[pp.OriginalIndex];
+                    if (scribes != null && scribes.Count > 0)
+                    {
+                        if (layerScribeIdx < 0)
+                        {
+                            layerScribeIdx = EnsureLayer(doc, SeaNestLayers.Scribe, System.Drawing.Color.Cyan);
+                            scribeAttrs = new ObjectAttributes { LayerIndex = layerScribeIdx };
+                        }
+                        foreach (var scribe in scribes)
+                        {
+                            var transformed = PolygonToCurve.ToCurveFromOriginal(scribe, pp, yOffset);
+                            var scribeId = doc.Objects.AddCurve(transformed, scribeAttrs);
+                            if (scribeId != Guid.Empty) createdObjectIds.Add(scribeId);
                         }
                     }
                 }
