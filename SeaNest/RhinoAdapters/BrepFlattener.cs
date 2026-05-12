@@ -720,6 +720,25 @@ namespace SeaNest.RhinoAdapters
         {
             if (curve == null) return null;
 
+            // Phase 15.1: orthographically project the curve onto `plane`
+            // BEFORE any further processing. The Transform.PlaneToPlane call
+            // below is a rigid 3D coordinate-frame transform — it preserves
+            // the out-of-plane (perpendicular) component of every point.
+            // Curves that lie exactly on `plane` are fine, but curves that
+            // bulge off `plane` (curved-face edges, and especially Phase
+            // 14.1.2's twin-plate average plane where edge curves deviate
+            // up to half the plate thickness) retain their 3D shape after
+            // the rigid transform — landing in the world-XY result with
+            // non-zero Z extent. ProjectToPlane is a perpendicular
+            // projection (orthographic shadow on the plane), which is
+            // exactly what plate flattening means and what the polygon
+            // path produces via Plane.ClosestParameter. Calling it here
+            // aligns the native curve with the polygon's geometric content.
+            // Graceful fallback to the un-projected curve on null —
+            // pre-15.1 output (small Z drift) is better than dropping the
+            // curve entirely.
+            var flattened = Curve.ProjectToPlane(curve, plane) ?? curve;
+
             var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
 
             // Phase 7c.5: for PolyCurve inputs, attempt to coalesce constituent
@@ -734,7 +753,7 @@ namespace SeaNest.RhinoAdapters
             // probes below. Disposal of segments / joined results follows the
             // file's existing convention (e.g. FlatBrepToPolygonOnPlane's
             // JoinCurves call): rely on GC, no explicit cleanup.
-            if (curve is PolyCurve polyCurve)
+            if (flattened is PolyCurve polyCurve)
             {
                 var segments = polyCurve.Explode();
                 if (segments != null && segments.Length > 0)
@@ -783,13 +802,13 @@ namespace SeaNest.RhinoAdapters
             // those NURBS to ArcCurve, which survives the transform and exports as
             // a native DXF circle/arc entity. Circle probed first because a full
             // circle also matches TryGetArc — circle is the more specific verdict.
-            if (curve.TryGetCircle(out Circle circle, modelTol))
+            if (flattened.TryGetCircle(out Circle circle, modelTol))
             {
                 var arcCurve = new ArcCurve(circle);
                 if (!arcCurve.Transform(planeToXY)) return null;
                 return arcCurve;
             }
-            if (curve.TryGetArc(out Arc arc, modelTol))
+            if (flattened.TryGetArc(out Arc arc, modelTol))
             {
                 var arcCurve = new ArcCurve(arc);
                 if (!arcCurve.Transform(planeToXY)) return null;
@@ -797,7 +816,7 @@ namespace SeaNest.RhinoAdapters
             }
 
             // General case — preserves native subclass through Transform.
-            var working = curve.DuplicateCurve();
+            var working = flattened.DuplicateCurve();
             if (working == null) return null;
             if (!working.Transform(planeToXY)) return null;
             return working;
