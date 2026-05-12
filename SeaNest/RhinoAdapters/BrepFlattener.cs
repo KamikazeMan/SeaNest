@@ -192,6 +192,21 @@ namespace SeaNest.RhinoAdapters
             double discretizeTol = modelTol * DiscretizationToleranceFactor;
             double angleTolRad = RhinoMath.ToRadians(UnrollAngleToleranceDegrees);
 
+            // Phase 16 (TEMPORARY): per-Brep flatten-path trace for the curved-
+            // skin foreshortening investigation. Logs the source Brep's 3D
+            // extent, the Step 1 path chosen (twin / largest-planar /
+            // fell-through), the FaceToPolygon outcome with poly bbox and
+            // both diagonal and area ratios versus the source, and which
+            // subsequent step (2/3/4) ran if Step 1 fell through.
+            var srcBB = brep.GetBoundingBox(true);
+            double srcW = srcBB.Max.X - srcBB.Min.X;
+            double srcH = srcBB.Max.Y - srcBB.Min.Y;
+            double srcD = srcBB.Max.Z - srcBB.Min.Z;
+            double srcDiag = srcBB.Diagonal.Length;
+            double srcAreaEstimate = -1;   // filled in if a face is selected below
+            RhinoApp.WriteLine(
+                $"Part flatten path: source Brep bbox=({srcW:F2}×{srcH:F2}×{srcD:F2}), diag={srcDiag:F2}");
+
             // Step 1: Thickened plate — twin-face topology first, then fall
             // back to largest-planar-face selection. Phase 14.1.2: twin-pair
             // detection identifies plates by structure (anti-parallel similar-
@@ -206,15 +221,53 @@ namespace SeaNest.RhinoAdapters
             {
                 plateFace = twinResult.Value.Face;
                 projectionPlane = twinResult.Value.Plane;
+                // Phase 16 (TEMPORARY)
+                var ampSel = AreaMassProperties.Compute(plateFace.DuplicateFace(false));
+                srcAreaEstimate = ampSel?.Area ?? -1;
+                var n = twinResult.Value.Plane.Normal;
+                RhinoApp.WriteLine(
+                    $"  Step 1a Twin: pair=(face {twinResult.Value.FaceIndexA},face {twinResult.Value.FaceIndexB}), " +
+                    $"selected face {plateFace.FaceIndex} area={srcAreaEstimate:F2}, " +
+                    $"avg plane normal=({n.X:F3},{n.Y:F3},{n.Z:F3})");
             }
             else
             {
                 plateFace = FindLargestPlanarFace(brep, modelTol);
+                // Phase 16 (TEMPORARY)
+                if (plateFace != null)
+                {
+                    var ampSel = AreaMassProperties.Compute(plateFace.DuplicateFace(false));
+                    srcAreaEstimate = ampSel?.Area ?? -1;
+                    RhinoApp.WriteLine(
+                        $"  Step 1a fallback (no twin): largest planar face={plateFace.FaceIndex} area={srcAreaEstimate:F2}");
+                }
+                else
+                {
+                    RhinoApp.WriteLine("  Step 1a: no twin and no planar face — Step 1 will not run.");
+                }
             }
             if (plateFace != null)
             {
                 var poly = FaceToPolygon(plateFace, discretizeTol, angleTolRad, modelTol, modelTol * PlanarityToleranceFactor, projectionPlane, out outerCurve, innerLoops);
-                if (poly != null) return poly;
+                if (poly != null)
+                {
+                    // Phase 16 (TEMPORARY): poly bbox + ratios.
+                    var pb = poly.BoundingBox;
+                    double pw = pb.MaxX - pb.MinX;
+                    double ph = pb.MaxY - pb.MinY;
+                    double pDiag = Math.Sqrt(pw * pw + ph * ph);
+                    double pArea = poly.AbsoluteArea;
+                    double diagRatio = (srcDiag > 0) ? (pDiag / srcDiag) : 0;
+                    double areaRatio = (srcAreaEstimate > 0) ? (pArea / srcAreaEstimate) : 0;
+                    RhinoApp.WriteLine(
+                        $"  Step 1b FaceToPolygon: poly bbox=({pw:F2}×{ph:F2}), diag={pDiag:F2}, " +
+                        $"verts={poly.Count}, area={pArea:F2}");
+                    RhinoApp.WriteLine(
+                        $"  Polygon-to-source ratio: diag={diagRatio:F3}, area={areaRatio:F3}" +
+                        $"{((diagRatio < 0.5 || areaRatio < 0.5) ? "  ← LIKELY FORESHORTENED" : "")}");
+                    return poly;
+                }
+                RhinoApp.WriteLine("  Step 1b FaceToPolygon returned null — falling through.");
                 outerCurve = null;
                 innerLoops.Clear();
             }
@@ -226,7 +279,14 @@ namespace SeaNest.RhinoAdapters
                 if (TryGetBrepPlane(brep, modelTol, out plane))
                 {
                     var poly = FlatBrepToPolygonOnPlane(brep, plane, modelTol, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
-                    if (poly != null) return poly;
+                    if (poly != null)
+                    {
+                        // Phase 16 (TEMPORARY)
+                        var pb = poly.BoundingBox;
+                        RhinoApp.WriteLine(
+                            $"  Step 2 FlatBrepToPolygonOnPlane: poly bbox=({pb.MaxX - pb.MinX:F2}×{pb.MaxY - pb.MinY:F2}), verts={poly.Count}");
+                        return poly;
+                    }
                     outerCurve = null;
                     innerLoops.Clear();
                 }
@@ -238,7 +298,14 @@ namespace SeaNest.RhinoAdapters
             if (unrolled != null)
             {
                 var poly = FlatBrepToPolygonOnPlane(unrolled, Plane.WorldXY, modelTol, discretizeTol, angleTolRad, modelTol, out outerCurve, innerLoops);
-                if (poly != null) return poly;
+                if (poly != null)
+                {
+                    // Phase 16 (TEMPORARY)
+                    var pb = poly.BoundingBox;
+                    RhinoApp.WriteLine(
+                        $"  Step 3 Unroll: poly bbox=({pb.MaxX - pb.MinX:F2}×{pb.MaxY - pb.MinY:F2}), verts={poly.Count}");
+                    return poly;
+                }
                 outerCurve = null;
                 innerLoops.Clear();
             }
@@ -252,6 +319,10 @@ namespace SeaNest.RhinoAdapters
                 var poly = SquishFaceToPolygon(squishFace, discretizeTol, angleTolRad, out outerCurve, innerLoops);
                 if (poly != null)
                 {
+                    // Phase 16 (TEMPORARY)
+                    var pb = poly.BoundingBox;
+                    RhinoApp.WriteLine(
+                        $"  Step 4 Squish: poly bbox=({pb.MaxX - pb.MinX:F2}×{pb.MaxY - pb.MinY:F2}), verts={poly.Count}");
                     SquishWarning?.Invoke(
                         "Squish flattening used — dimensions may be approximate for curved parts.");
                     return poly;
@@ -360,7 +431,7 @@ namespace SeaNest.RhinoAdapters
         /// <see cref="FindLargestPlanarFace"/> for surfaces, non-plate solids,
         /// or extreme plate geometries (heavy taper, asymmetric trim).
         /// </summary>
-        private static (BrepFace Face, Plane Plane)? FindTwinPlateFace(Brep brep, double tolerance)
+        private static (BrepFace Face, Plane Plane, int FaceIndexA, int FaceIndexB)? FindTwinPlateFace(Brep brep, double tolerance)
         {
             // Inventory: gather (face, centroid, unit-normal, area, max-dim)
             // for every face that survives DuplicateFace + AreaMassProperties.
@@ -395,6 +466,10 @@ namespace SeaNest.RhinoAdapters
             BrepFace bestFace = null;
             Plane bestPlane = Plane.Unset;
             double bestCombinedArea = -1;
+            // Phase 16 (TEMPORARY): track the two faces forming the winning
+            // pair so FlattenRaw's flatten-path diagnostic can name them.
+            int bestFaceIndexA = -1;
+            int bestFaceIndexB = -1;
 
             for (int i = 0; i < inventory.Count; i++)
             {
@@ -426,6 +501,9 @@ namespace SeaNest.RhinoAdapters
                         // since the projection plane is the average.
                         bestFace = (a.area >= b.area) ? a.face : b.face;
                         bestCombinedArea = combined;
+                        // Phase 16 (TEMPORARY): record pair indices.
+                        bestFaceIndexA = a.face.FaceIndex;
+                        bestFaceIndexB = b.face.FaceIndex;
 
                         // Average plane: origin = midpoint of centroids,
                         // normal = (a.normal − b.normal) / 2 (since
@@ -443,7 +521,7 @@ namespace SeaNest.RhinoAdapters
             }
 
             if (bestFace == null) return null;
-            return (bestFace, bestPlane);
+            return (bestFace, bestPlane, bestFaceIndexA, bestFaceIndexB);
         }
 
         private static Polygon FaceToPolygon(BrepFace face, double discretizeTol, double angleTolRad, double modelTol, double planarityTol, Plane? overridePlane, out Curve outerCurveOut, List<Curve> innerLoopsOut)
