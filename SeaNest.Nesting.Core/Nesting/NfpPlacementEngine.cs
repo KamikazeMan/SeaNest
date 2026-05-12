@@ -169,14 +169,14 @@ namespace SeaNest.Nesting.Core.Nesting
             // Logs sheet dims, source bbox, and the per-part orientation count
             // so we can verify the engine sees the expected enumeration. Each
             // orientation gets its own fits-on-sheet line below.
-            var sourcePoly = _request.Polygons[partIndex];
-            var srcBBox = sourcePoly.BoundingBox;
-            double srcW = srcBBox.MaxX - srcBBox.MinX;
-            double srcH = srcBBox.MaxY - srcBBox.MinY;
+            var diagSourcePoly = _request.Polygons[partIndex];
+            var diagSrcBBox = diagSourcePoly.BoundingBox;
+            double diagSrcW = diagSrcBBox.MaxX - diagSrcBBox.MinX;
+            double diagSrcH = diagSrcBBox.MaxY - diagSrcBBox.MinY;
             DiagnosticLog?.Invoke(
                 $"  TryPlaceOnSheet entry: part={partIndex} sheet={sheetIdx} " +
                 $"sheet.Placed.Count={sheet.Placed.Count} " +
-                $"source bbox: {srcW:F2} × {srcH:F2}, " +
+                $"source bbox: {diagSrcW:F2} × {diagSrcH:F2}, " +
                 $"sheet: {_request.SheetWidth:F2} × {_request.SheetHeight:F2} " +
                 $"(margin {_request.Margin:F2}), " +
                 $"orientations: {orientations.Count}");
