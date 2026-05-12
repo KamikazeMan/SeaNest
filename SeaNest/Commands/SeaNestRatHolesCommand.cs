@@ -197,22 +197,22 @@ namespace SeaNest.Commands
 
             var debugPoints = new List<Point3d>();
             int skewSkipped = 0;
-            int thinSkipped = 0;
+            int kerfTooLargeSkipped = 0;
+            int edgeTooShortSkipped = 0;
             double minLength = modelTol * IntersectionLengthFilterFactor;
 
             for (int p = 0; p < plates.Count; p++)
             {
                 var plate = plates[p];
                 var plateBBox = plate.GetBoundingBox(true);
+                // Phase 20a.1: plate thickness is needed for slot-width math
+                // and cutter depths, but NOT a rejection criterion. Plate
+                // thickness and rat-hole radius are on different geometric
+                // axes (radius is in-plane along the edge; thickness is
+                // perpendicular to the face). Thin plates with reasonable
+                // radii are valid. Only kerf-compensated drawn dimensions
+                // and edge-segment length are tested per-intersection below.
                 var plateThickness = MinBBoxAxis(plateBBox);
-                if (plateThickness < radius * 0.5)
-                {
-                    RhinoApp.WriteLine(string.Format(
-                        "  Plate {0}: thickness {1:G3} below radius/2 — skipped.",
-                        p + 1, plateThickness));
-                    thinSkipped++;
-                    continue;
-                }
 
                 // Identify plate's main (largest-area) face for the plate-side
                 // anchor projection. Same heuristic the original Phase 2 code
@@ -254,15 +254,14 @@ namespace SeaNest.Commands
                     var overlap = BoundingBox.Intersection(plateBBox, memberBBox);
                     if (!overlap.IsValid) continue;
 
+                    // Phase 20a.1: member thickness sizes the cutter depth (4×
+                    // through-cut) but is NOT a rejection criterion. Member
+                    // thickness is along the plate-normal direction (slot
+                    // depth); the rat-hole radius is on the plate face along
+                    // the edge. They're geometrically unrelated. Real
+                    // feasibility is checked per-intersection after kerf
+                    // compensation below.
                     var memberThickness = MinBBoxAxis(memberBBox);
-                    if (memberThickness < modelTol * 100.0)
-                    {
-                        RhinoApp.WriteLine(string.Format(
-                            "  Member {0}: too thin ({1:G3}) — skipped vs plate {2}.",
-                            m + 1, memberThickness, p + 1));
-                        thinSkipped++;
-                        continue;
-                    }
 
                     Curve[] curves;
                     bool ok;
@@ -341,6 +340,7 @@ namespace SeaNest.Commands
                             RhinoApp.WriteLine(string.Format(
                                 "  Drawn slot width {0:G3} ≤ 0 after kerf comp (kerf {1:G3} ≥ nominal {2:G3}) — skipped.",
                                 drawnSlotWidth, kerf, nominalSlotWidth));
+                            kerfTooLargeSkipped++;
                             continue;
                         }
 
@@ -358,6 +358,23 @@ namespace SeaNest.Commands
                             RhinoApp.WriteLine(string.Format(
                                 "  Drawn rat-hole radius {0:G3} ≤ 0 after kerf comp — skipped.",
                                 drawnRadius));
+                            kerfTooLargeSkipped++;
+                            continue;
+                        }
+
+                        // Phase 20a.1 — edge-segment-fits check. The plate's
+                        // edge at this intersection must be long enough to
+                        // accept the half-circle's chord (2 × drawnRadius).
+                        // Approximated by the intersection-curve length, which
+                        // is the plate edge segment in contact with the member.
+                        // Independent of plate thickness, member thickness, or
+                        // skew angle.
+                        if (loop.GetLength() < 2.0 * drawnRadius)
+                        {
+                            RhinoApp.WriteLine(string.Format(
+                                "  Plate {0} × member {1}: edge segment {2:G3} < 2 × drawn radius {3:G3} — skipped.",
+                                p + 1, m + 1, loop.GetLength(), 2.0 * drawnRadius));
+                            edgeTooShortSkipped++;
                             continue;
                         }
 
@@ -455,8 +472,14 @@ namespace SeaNest.Commands
                 RhinoApp.WriteLine(string.Format(
                     "  Skipped {0} intersection(s) for skew > {1}° from perpendicular.",
                     skewSkipped, 90 - SkewRejectAngleDegrees));
-            if (thinSkipped > 0)
-                RhinoApp.WriteLine(string.Format("  Skipped {0} thin part(s).", thinSkipped));
+            if (kerfTooLargeSkipped > 0)
+                RhinoApp.WriteLine(string.Format(
+                    "  Skipped {0} intersection(s) — kerf too large (drawn dimension ≤ 0).",
+                    kerfTooLargeSkipped));
+            if (edgeTooShortSkipped > 0)
+                RhinoApp.WriteLine(string.Format(
+                    "  Skipped {0} intersection(s) — edge segment too short for rat-hole radius.",
+                    edgeTooShortSkipped));
             if (booleanFailures > 0)
                 RhinoApp.WriteLine(string.Format(
                     "  {0} boolean failure(s) — affected parts left unchanged.", booleanFailures));
