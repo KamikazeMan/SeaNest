@@ -9,6 +9,7 @@ using Rhino.FileIO;
 using Rhino.UI;
 using RhinoCommand = Rhino.Commands.Command;
 using Result = Rhino.Commands.Result;
+using RunMode = Rhino.Commands.RunMode;
 
 namespace SeaNest.Commands
 {
