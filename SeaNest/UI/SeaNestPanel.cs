@@ -69,7 +69,6 @@ namespace SeaNest
                 case "trim": RhinoApp.RunScript("SeaNestTrim", false); break;
                 case "renest": RhinoApp.RunScript("SeaNestReNest", false); break;
                 case "export": RhinoApp.RunScript("SeaNestExport", false); break;
-                case "frames": RhinoApp.RunScript("SeaNestFrames", false); break;
                 case "plate": RhinoApp.RunScript("SeaNestPlate", false); break;
                 case "nest": RhinoApp.RunScript("SeaNestNest", false); break;
                 case "settings": RhinoApp.RunScript("SeaNestSettings", false); break;
@@ -352,7 +351,7 @@ namespace SeaNest
   <div class=""tool-grid"">
     <div class=""tool-btn anim4"" style=""--accent:#d63031;--icon-bg:rgba(214,48,49,0.08);--icon-glow:rgba(214,48,49,0.12)"" onclick=""nav('slots')"">
       <div class=""tool-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><path d=""M10 3H6a2 2 0 00-2 2v4""/><path d=""M14 3h4a2 2 0 012 2v4""/><path d=""M10 21H6a2 2 0 01-2-2v-4""/><path d=""M14 21h4a2 2 0 002-2v-4""/><line x1=""9"" y1=""12"" x2=""15"" y2=""12""/></svg></div>
-      <div><div class=""tool-label"">Interlocking Slots</div><div class=""tool-shortcut"">Ctrl+I</div></div>
+      <div><div class=""tool-label"">Slots</div><div class=""tool-shortcut"">Ctrl+I</div></div>
     </div>
     <div class=""tool-btn anim4"" style=""--accent:#f39c12;--icon-bg:rgba(243,156,18,0.08);--icon-glow:rgba(243,156,18,0.12)"" onclick=""nav('ratholes')"">
       <div class=""tool-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><circle cx=""12"" cy=""12"" r=""3""/><circle cx=""12"" cy=""12"" r=""8"" stroke-dasharray=""4 3""/></svg></div>
@@ -362,11 +361,7 @@ namespace SeaNest
       <div class=""tool-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><circle cx=""6"" cy=""6"" r=""3""/><path d=""M8.12 8.12L12 12""/><path d=""M20 4L8.12 15.88""/><circle cx=""6"" cy=""18"" r=""3""/><path d=""M14.8 14.8L20 20""/></svg></div>
       <div><div class=""tool-label"">Auto Trimming</div><div class=""tool-shortcut"">Ctrl+T</div></div>
     </div>
-    <div class=""tool-btn anim5"" style=""--accent:#00cec9;--icon-bg:rgba(0,206,201,0.08);--icon-glow:rgba(0,206,201,0.12)"" onclick=""nav('frames')"">
-      <div class=""tool-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><rect x=""3"" y=""3"" width=""18"" height=""18"" rx=""2""/><line x1=""12"" y1=""3"" x2=""12"" y2=""21"" stroke-dasharray=""3 2""/><line x1=""3"" y1=""12"" x2=""21"" y2=""12"" stroke-dasharray=""3 2""/></svg></div>
-      <div><div class=""tool-label"">Frame Lines</div><div class=""tool-shortcut"">Ctrl+F</div></div>
-    </div>
-    <div class=""tool-btn anim6"" style=""--accent:#a29bfe;--icon-bg:rgba(162,155,254,0.08);--icon-glow:rgba(162,155,254,0.12)"" onclick=""nav('plate')"">
+    <div class=""tool-btn anim5"" style=""--accent:#a29bfe;--icon-bg:rgba(162,155,254,0.08);--icon-glow:rgba(162,155,254,0.12)"" onclick=""nav('plate')"">
       <div class=""tool-icon""><svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2""><rect x=""2"" y=""6"" width=""20"" height=""12"" rx=""2""/><line x1=""12"" y1=""6"" x2=""12"" y2=""18"" stroke-dasharray=""2 2""/><line x1=""7"" y1=""6"" x2=""7"" y2=""18"" opacity=""0.4"" stroke-dasharray=""2 2""/></svg></div>
       <div><div class=""tool-label"">Custom Plate</div><div class=""tool-shortcut"">Ctrl+P</div></div>
     </div>
@@ -419,7 +414,7 @@ function nav(cmd) {
   var log = document.getElementById('logWrap');
   var now = new Date();
   var t = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
-  var names = {thicken:'Thicken',slots:'Slots',ratholes:'Rat Holes',trim:'Trim',frames:'Frames',plate:'Plate',nest:'Nest',renest:'Re-Nest',export:'Export',settings:'Settings',close:'Close'};
+  var names = {thicken:'Thicken',slots:'Slots',ratholes:'Rat Holes',trim:'Trim',plate:'Plate',nest:'Nest',renest:'Re-Nest',export:'Export',settings:'Settings',close:'Close'};
   var entry = document.createElement('div');
   entry.className = 'log-entry';
   entry.innerHTML = '<span class=""log-time"">' + t + '</span><span class=""log-action"">' + (names[cmd]||cmd) + '</span><span class=""log-detail"">— activated</span>';
