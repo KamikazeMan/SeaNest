@@ -415,6 +415,17 @@ namespace SeaNest.Commands
 
             for (int p = 0; p < plates.Count; p++)
             {
+                // Phase 20a.2 — silent-skip when no cutters were accumulated
+                // for this plate. Reasons cutters may be zero:
+                //   (a) no member's bbox overlapped this plate, or
+                //   (b) every per-pair intersection loop was rejected by a
+                //       feasibility check (edge-too-short, kerf-too-large,
+                //       skew-too-steep, drawnRadius/drawnSlotWidth ≤ 0).
+                // Per-rejection messages were already logged at the rejection
+                // site; the apply pass doesn't repeat itself. Silent-skip is
+                // correct: the plate stays unmodified, which IS the right
+                // outcome when nothing needs cutting. CreateBooleanDifference
+                // is NEVER called with an empty cutter list.
                 if (plateCutters[p].Count == 0) continue;
                 var result = ApplyCutters(plates[p], plateCutters[p], modelTol);
                 if (result == null)
@@ -440,6 +451,9 @@ namespace SeaNest.Commands
 
             for (int m = 0; m < members.Count; m++)
             {
+                // Phase 20a.2 — same silent-skip contract as the plate loop
+                // above. CreateBooleanDifference never receives an empty
+                // cutter list.
                 if (memberCutters[m].Count == 0) continue;
                 var result = ApplyCutters(members[m], memberCutters[m], modelTol);
                 if (result == null)
@@ -758,6 +772,10 @@ namespace SeaNest.Commands
         /// Apply a list of accumulated cutters to a single part via one
         /// Brep.CreateBooleanDifference call. Returns the largest-volume
         /// result Brep on success, or null on failure.
+        ///
+        /// Preconditions (enforced by the caller's silent-skip): cutters is
+        /// non-null and Count &gt; 0. Defensive null-and-empty check inside
+        /// is kept as a belt-and-suspenders safety against future refactors.
         /// </summary>
         private static Brep ApplyCutters(Brep part, IReadOnlyList<Brep> cutters, double tol)
         {
