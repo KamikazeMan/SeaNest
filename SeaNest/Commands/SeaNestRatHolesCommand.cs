@@ -5,36 +5,41 @@ using Rhino;
 using Rhino.Commands;
 using Rhino.DocObjects;
 using Rhino.Geometry;
-using Rhino.Geometry.Intersect;
 using Rhino.Input;
 using Rhino.Input.Custom;
+using SeaNest.Geometry;
 
 namespace SeaNest.Commands
 {
     /// <summary>
-    /// Phase 20a.7 — SeaNestRatHoles dual-cut using the mid-plane intersection
-    /// algorithm. Replaces the prior anchor-finding heuristics (FindEdgeAnchor,
-    /// ComputeAlongMember, body-reference sign corrections) with a single
-    /// well-defined geometric primitive: the joint centerline is the
-    /// intersection of the two plate mid-planes; the bottom/top anchors are
-    /// where that line hits each plate's mid-plane outline.
+    /// SeaNestRatHoles — dual-cut rat-hole + interlocking-slot joinery for
+    /// plate × structural-member intersections, using the mid-plane
+    /// intersection algorithm (Phase 20a.7).
     ///
-    /// For each plate × structural-member pair:
-    ///   - Mid-plane of plate := plane between its two anti-parallel large faces
-    ///   - Mid-plane of member := same
-    ///   - Joint centerline := Intersection.PlanePlane(midPlate, midMember)
-    ///   - Plate bottom anchor := bottommost intersection of joint line with
-    ///     the plate's mid-plane outline (Intersection.BrepPlane)
-    ///   - Member top anchor := topmost equivalent on the member
-    ///   - Plate gets a compound cutter: rectangular slot (anchor → midpoint)
-    ///     plus a full-circle rat-hole cylinder at the anchor
-    ///   - Member gets a stadium cutter (anchor → midpoint, with a rounded
-    ///     bottom for stress relief)
+    /// For each plate × member pair:
+    ///   - Mid-plane of each plate := plane between its two anti-parallel
+    ///     large faces (via Phase 14.1.2 twin-pair detection, see
+    ///     <see cref="JointGeometryHelpers.GetPlateInfo"/>)
+    ///   - Joint centerline := <c>Intersection.PlanePlane(midFrame, midMember)</c>
+    ///   - Anchors := where the joint line crosses each plate's mid-plane
+    ///     outline (<see cref="JointGeometryHelpers.FindExtremeJointHit"/>)
+    ///   - Frame (plate) compound cutter: rectangular slot from bottom
+    ///     anchor up to joint midpoint with a half-circle dome cap past
+    ///     the chord, plus a full-circle rat-hole cylinder centered on
+    ///     the bottom edge
+    ///   - Stringer (member) stadium cutter: rounded-bottom slot from
+    ///     top anchor down to joint midpoint with the rounded dome past
+    ///     the chord (built via <see cref="JointGeometryHelpers.BuildStadiumSlotCutter"/>)
     ///
     /// The full-circle rat hole sidesteps the half-circle's bulge-direction
     /// sign issues — the cylinder is rotationally symmetric, so the half
     /// inside the plate body removes material (= rat hole) and the half
     /// outside does nothing.
+    ///
+    /// Phase 20a.8: shared joint-geometry helpers extracted into
+    /// <see cref="JointGeometryHelpers"/> for reuse by SeaNestSlotsCommand
+    /// (Phase 20b, watertight slot variant). This file retains only the
+    /// rat-hole-specific compound-cutter logic and the dispatch wiring.
     /// </summary>
     public class SeaNestRatHolesCommand : Command
     {
@@ -48,13 +53,6 @@ namespace SeaNest.Commands
         // nominal) plus boolean failures from thin-vs-plate aspect ratios.
         private const double ClearanceTotal = 1.0 / 16.0;   // 1/16" total
 
-        // Phase 20a.7.8: AssemblyClearance const removed. The dome caps now
-        // extend PAST the chord into solid material (each side's cut goes
-        // a half-circle beyond the joint centerline). Both chord lines
-        // land exactly at the joint center — even and aligned — and the
-        // domes themselves are cavities inside their parent solids, so
-        // they never physically collide regardless of fit tolerance.
-
         // Reject crossings less than this angle between plate and member faces
         // (i.e. when sin(angleBetween) < 0.05 ≈ 3°). Below this the slot
         // dimensions blow up and the joint is impractical to assemble.
@@ -62,25 +60,14 @@ namespace SeaNest.Commands
 
         // Cutter extrusion depth multiplier. Cutter passes through plate's
         // thickness by this factor on each side (so 2× total). Phase 20a.7.4:
-        // reduced from 4.0 to 2.0 — the original 4× margin had cutters
-        // overshooting the plate faces by 1.5× thickness each, which
-        // (combined with mid-plane face-coincidence) tripped Rhino's
-        // CreateBooleanDifference into returning the intersection slice
-        // instead of the part-with-hole. 2× still cleanly punches through
-        // (0.125" overhang per face on a 0.25" plate) without producing
-        // pathological boolean inputs.
+        // 4.0 → 2.0 to avoid pathological boolean inputs from huge overshoot.
         private const double CutterOvercutFactor = 2.0;
 
         // Phase 20a.7.4: offset the cutter centroid off the plate's
-        // mid-plane by this multiple of modelTol. Without it, the cutter is
-        // exactly centered on the plate's mid-plane — and parallel/coincident
-        // internal planes confuse the boolean algorithm, causing it to keep
-        // the intersection sliver instead of the part-minus-hole. The offset
-        // is along the plate's normal, so the cutter shifts perpendicular to
-        // the cut plane while still spanning the plate's full thickness.
-        // 2× modelTol is small enough to be visually unmeasurable on plate
-        // work (0.02" at typical doc tol) but large enough to break the
-        // coincident-face condition.
+        // mid-plane by this multiple of modelTol. Breaks face-coincidence
+        // between cutter and plate mid-plane that confused the boolean
+        // algorithm into returning the intersection sliver instead of the
+        // part-minus-hole.
         private const double CutterMidPlaneOffsetFactor = 2.0;
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
@@ -108,11 +95,6 @@ namespace SeaNest.Commands
             gw.AcceptNothing(true);
             if (gw.Get() == GetResult.Number) radius = gw.Number();
 
-            // Phase 20a.7.3: no cutting-method prompt. We cut FINAL geometry
-            // dimensions and let downstream CAM software handle kerf at
-            // toolpath generation. Drop the Router/Waterjet/Plasma selection
-            // along with the kerf constants — consistent with Phase 17 export
-            // and Phase 19b scribe lines, which also don't model kerf.
             double clearance = ClearanceTotal * inchScale;
 
             RhinoApp.WriteLine(string.Format(
@@ -202,7 +184,6 @@ namespace SeaNest.Commands
             for (int i = 0; i < members.Count; i++) memberCutters.Add(new List<Brep>());
 
             int pairsSkipped = 0;
-            int pairsProcessed = 0;
 
             for (int p = 0; p < plates.Count; p++)
             {
@@ -237,7 +218,6 @@ namespace SeaNest.Commands
                         plateCutters[p].AddRange(joint.FrameCutters);
                     if (joint?.StringerCutters != null)
                         memberCutters[m].AddRange(joint.StringerCutters);
-                    pairsProcessed++;
                 }
             }
 
@@ -251,7 +231,7 @@ namespace SeaNest.Commands
             for (int p = 0; p < plates.Count; p++)
             {
                 if (plateCutters[p].Count == 0) continue;
-                var result = ApplyCutters(plates[p], plateCutters[p], modelTol);
+                var result = JointGeometryHelpers.ApplyCutters(plates[p], plateCutters[p], modelTol);
                 if (result == null)
                 {
                     RhinoApp.WriteLine(string.Format(
@@ -276,7 +256,7 @@ namespace SeaNest.Commands
             for (int m = 0; m < members.Count; m++)
             {
                 if (memberCutters[m].Count == 0) continue;
-                var result = ApplyCutters(members[m], memberCutters[m], modelTol);
+                var result = JointGeometryHelpers.ApplyCutters(members[m], memberCutters[m], modelTol);
                 if (result == null)
                 {
                     RhinoApp.WriteLine(string.Format(
@@ -317,48 +297,21 @@ namespace SeaNest.Commands
         }
 
         // ---------------------------------------------------------------
-        // Joint geometry primitives
+        // Joint-cutter dispatch (rat-hole-specific)
         // ---------------------------------------------------------------
+        //
+        // Phase 20a.8: shared joint geometry primitives (GetPlateInfo,
+        // SectionPlateAtMidPlane, FindExtremeJointHit, etc.) live in
+        // JointGeometryHelpers. This file retains the rat-hole-specific
+        // compound-cutter builder + the dispatch that wires it together
+        // with the shared stringer stadium cutter.
 
         /// <summary>
-        /// Plate-as-thin-sheet metadata: the mid-plane between the two large
-        /// anti-parallel faces, the mid-plane normal (= the plate's "thin"
-        /// direction), and the perpendicular thickness.
-        /// </summary>
-        private class PlateInfo
-        {
-            public Plane MidPlane;
-            public Vector3d Normal;
-            public double Thickness;
-        }
-
-        /// <summary>
-        /// Output of <see cref="BuildFrameStringerJointCutters"/> — one set of
-        /// cutters for the frame (plate) and one for the stringer (member),
-        /// plus the joint geometry for diagnostics.
-        /// </summary>
-        private class JointCutResult
-        {
-            public Brep[] FrameCutters;
-            public Brep[] StringerCutters;
-            public Point3d FrameBottomAnchor;
-            public Point3d StringerTopAnchor;
-            public Point3d StringerMidPoint;
-            public Vector3d UpDir;
-            public Vector3d FrameNormal;
-            public Vector3d StringerNormal;
-        }
-
-        /// <summary>
-        /// Phase 20a.7 — main per-pair joint-compute. Computes the joint
-        /// centerline as Intersection.PlanePlane(frameMid, stringerMid),
-        /// then finds the frame's bottom anchor and the stringer's top/bottom
-        /// anchors by intersecting the joint line with each plate's mid-plane
-        /// outline (Intersection.BrepPlane). Builds:
-        ///   - Frame compound cutter: rectangle slot from anchor → stringer
-        ///     midpoint, plus full-circle rat-hole cylinder at the anchor
-        ///   - Stringer stadium cutter: rounded slot from stringer top anchor
-        ///     down to the midpoint
+        /// Main per-pair joint-compute. Returns a <see cref="JointCutResult"/>
+        /// with both the frame compound cutters (rectangle slot + full-circle
+        /// rat-hole) and the stringer stadium cutter. Shared joint-geometry
+        /// math (mid-plane detection, joint centerline, anchor finding) is
+        /// delegated to <see cref="JointGeometryHelpers"/>.
         /// </summary>
         private static JointCutResult BuildFrameStringerJointCutters(
             Brep frame, Brep stringer,
@@ -367,8 +320,8 @@ namespace SeaNest.Commands
         {
             Vector3d worldUp = Vector3d.ZAxis;
 
-            PlateInfo frameInfo = GetPlateInfoFromLargestPlanarFaces(frame, tol);
-            PlateInfo stringerInfo = GetPlateInfoFromLargestPlanarFaces(stringer, tol);
+            PlateInfo frameInfo = JointGeometryHelpers.GetPlateInfo(frame, tol);
+            PlateInfo stringerInfo = JointGeometryHelpers.GetPlateInfo(stringer, tol);
 
             Vector3d nf = frameInfo.Normal; nf.Unitize();
             Vector3d ns = stringerInfo.Normal; ns.Unitize();
@@ -378,20 +331,18 @@ namespace SeaNest.Commands
             if (sinAngle < ParallelRejectSinThreshold)
                 throw new Exception("frame and member are nearly parallel");
 
-            if (!Intersection.PlanePlane(frameInfo.MidPlane, stringerInfo.MidPlane, out Line jointLine))
+            if (!Rhino.Geometry.Intersect.Intersection.PlanePlane(
+                    frameInfo.MidPlane, stringerInfo.MidPlane, out Line jointLine))
                 throw new Exception("mid-planes do not intersect");
 
             Vector3d upDir = jointLine.Direction;
             if (!upDir.Unitize())
                 throw new Exception("joint centerline has zero length");
-            // Orient up toward world +Z. For typical boat-orientation
-            // workflows this is the right convention. For unusually-rotated
-            // geometry the user can pre-orient the document.
             if (upDir * worldUp < 0.0) upDir.Reverse();
 
             // Section both plates at their own mid-planes.
-            Curve[] frameOutline = SectionPlateAtMidPlane(frame, frameInfo.MidPlane, tol);
-            Curve[] stringerOutline = SectionPlateAtMidPlane(stringer, stringerInfo.MidPlane, tol);
+            Curve[] frameOutline = JointGeometryHelpers.SectionPlateAtMidPlane(frame, frameInfo.MidPlane, tol);
+            Curve[] stringerOutline = JointGeometryHelpers.SectionPlateAtMidPlane(stringer, stringerInfo.MidPlane, tol);
             if (frameOutline.Length == 0)
                 throw new Exception("frame mid-plane section returned no curves");
             if (stringerOutline.Length == 0)
@@ -399,25 +350,22 @@ namespace SeaNest.Commands
 
             // Anchors: where the joint line crosses each outline.
             Point3d frameBottomAnchor =
-                FindExtremeJointHit(frameOutline, jointLine, upDir, findTop: false, tol);
+                JointGeometryHelpers.FindExtremeJointHit(frameOutline, jointLine, upDir, findTop: false, tol);
             Point3d stringerTopAnchor =
-                FindExtremeJointHit(stringerOutline, jointLine, upDir, findTop: true, tol);
+                JointGeometryHelpers.FindExtremeJointHit(stringerOutline, jointLine, upDir, findTop: true, tol);
             Point3d stringerBottomAnchor =
-                FindExtremeJointHit(stringerOutline, jointLine, upDir, findTop: false, tol);
+                JointGeometryHelpers.FindExtremeJointHit(stringerOutline, jointLine, upDir, findTop: false, tol);
 
             Point3d stringerMidPoint = new Point3d(
                 (stringerTopAnchor.X + stringerBottomAnchor.X) * 0.5,
                 (stringerTopAnchor.Y + stringerBottomAnchor.Y) * 0.5,
                 (stringerTopAnchor.Z + stringerBottomAnchor.Z) * 0.5);
 
-            // Cut heights along the joint centerline. Phase 20a.7.8 — these
-            // are CHORD positions (where each stadium's straight portion
-            // ends and the dome cap begins), NOT the dome apex. Each
-            // dome extends past its chord into solid material on the far
-            // side of the joint center. Both chords land at the joint
-            // center, evenly aligned.
-            double frameCutHeight = DistanceAlong(frameBottomAnchor, stringerMidPoint, upDir);
-            double stringerSlotDepth = DistanceAlong(stringerMidPoint, stringerTopAnchor, upDir);
+            // Cut heights along the joint centerline. These are CHORD
+            // positions (where each stadium's straight portion ends and
+            // the dome cap begins) — NOT the dome apex.
+            double frameCutHeight = JointGeometryHelpers.DistanceAlong(frameBottomAnchor, stringerMidPoint, upDir);
+            double stringerSlotDepth = JointGeometryHelpers.DistanceAlong(stringerMidPoint, stringerTopAnchor, upDir);
 
             if (frameCutHeight <= tol)
                 throw new Exception("frame cut height ≤ 0");
@@ -425,16 +373,12 @@ namespace SeaNest.Commands
                 throw new Exception("stringer slot depth ≤ 0");
 
             // Slot widths: final = mating thickness + clearance, scaled by
-            // 1/sinAngle for oblique crossings (the perpendicular plate thickness
-            // projects wider along the slot's width axis). Phase 20a.7.3: no
-            // kerf subtraction — CAM handles it at toolpath time.
+            // 1/sinAngle for oblique crossings.
             double frameSlotWidth = (stringerInfo.Thickness + clearance) / sinAngle;
             double stringerSlotWidth = (frameInfo.Thickness + clearance) / sinAngle;
 
-            if (frameSlotWidth <= tol)
-                throw new Exception("frame slot width ≤ 0");
-            if (stringerSlotWidth <= tol)
-                throw new Exception("stringer slot width ≤ 0");
+            if (frameSlotWidth <= tol) throw new Exception("frame slot width ≤ 0");
+            if (stringerSlotWidth <= tol) throw new Exception("stringer slot width ≤ 0");
 
             // In-plane width axes (perpendicular to upDir, in each plate's plane).
             Vector3d frameWidthDir = Vector3d.CrossProduct(upDir, nf);
@@ -445,10 +389,8 @@ namespace SeaNest.Commands
             double cutterDepth = Math.Max(frameInfo.Thickness, stringerInfo.Thickness)
                                  * CutterOvercutFactor;
 
-            // Phase 20a.7.4: offset each cutter's center off the plate's
-            // mid-plane (perpendicular to the plate face, along the plate's
-            // normal). Breaks face-coincidence between cutter and plate
-            // mid-plane — see CutterMidPlaneOffsetFactor doc comment.
+            // Offset each cutter's center off the plate's mid-plane to
+            // break face-coincidence with Rhino's boolean algorithm.
             double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
             Point3d frameAnchorForCut = frameBottomAnchor + nf * midPlaneOffset;
             Point3d stringerAnchorForCut = stringerTopAnchor + ns * midPlaneOffset;
@@ -458,7 +400,9 @@ namespace SeaNest.Commands
                 frameSlotWidth, frameCutHeight, frameRatHoleRadius,
                 cutterDepth, tol);
 
-            Brep[] stringerCutters = BuildStringerStadiumCutter(
+            // Member-side stadium is the generic slot cutter — shared with
+            // SeaNestSlotsCommand via JointGeometryHelpers.
+            Brep[] stringerCutters = JointGeometryHelpers.BuildStadiumSlotCutter(
                 stringerAnchorForCut, ns, stringerWidthDir, upDir,
                 stringerSlotWidth, stringerSlotDepth,
                 cutterDepth, tol);
@@ -477,195 +421,16 @@ namespace SeaNest.Commands
         }
 
         /// <summary>
-        /// Identify a thin plate's mid-plane.
+        /// Build the frame's compound cutter set: a stadium-shaped slot
+        /// extending upward from the bottom anchor (rectangle + half-circle
+        /// dome cap past the chord into the stringer's body), plus a
+        /// full-circle rat-hole cylinder centered ON the frame's bottom
+        /// edge. The half of the cylinder inside the plate body becomes
+        /// the rat-hole bite; the half outside is geometrically harmless.
         ///
-        /// Phase 20a.7.1 — primary path uses
-        /// <see cref="SeaNest.RhinoAdapters.BrepFlattener.FindTwinPlateFace"/>,
-        /// Phase 14.1.2's twin-pair detection that's already tuned for marine
-        /// plate geometry (10° anti-parallel tolerance, 0.7 area-ratio
-        /// minimum, 0.1 separation-ratio maximum). The returned `Plane` IS
-        /// the mid-plane — origin is the midpoint of the two face centroids,
-        /// normal averages the two opposing face normals. Thickness is
-        /// derived as 2× the perpendicular distance from the returned face's
-        /// centroid to the mid-plane.
-        ///
-        /// Fallback path (when twin-pair fails): use the largest planar face
-        /// and synthesize a mid-plane by computing the brep's bbox extents
-        /// along that face's normal. Mid-plane origin sits at the midpoint
-        /// of those extents. Thickness = extent range. Less robust for
-        /// non-axis-aligned or odd-shaped plates but provides a working
-        /// answer when the twin-pair criteria reject (e.g., heavily curved
-        /// plates where the two large faces aren't planar).
-        /// </summary>
-        private static PlateInfo GetPlateInfoFromLargestPlanarFaces(Brep brep, double tol)
-        {
-            // Primary: Phase 14.1.2 twin-pair detection.
-            var twin = SeaNest.RhinoAdapters.BrepFlattener.FindTwinPlateFace(brep, tol);
-            if (twin != null)
-            {
-                var face = twin.Value.Face;
-                var midPlane = twin.Value.Plane;
-                Vector3d normal = midPlane.Normal;
-                if (!normal.Unitize()) throw new Exception("twin-pair mid-plane normal degenerate");
-
-                // Thickness = 2 × perpendicular distance from face centroid
-                // to the mid-plane (the twin face sits at the same distance
-                // on the other side by construction).
-                double thickness;
-                using (var faceBrep = face.DuplicateFace(false))
-                {
-                    var amp = AreaMassProperties.Compute(faceBrep);
-                    if (amp == null) throw new Exception("twin-pair face centroid failed");
-                    double signedDist = (amp.Centroid - midPlane.Origin) * normal;
-                    thickness = 2.0 * Math.Abs(signedDist);
-                }
-                if (thickness < tol)
-                    throw new Exception("twin-pair thickness ≤ tolerance");
-
-                return new PlateInfo
-                {
-                    MidPlane = midPlane,
-                    Normal = normal,
-                    Thickness = thickness,
-                };
-            }
-
-            // Fallback: largest planar face + bbox extents along its normal.
-            BrepFace largest = null;
-            Plane largestPlane = Plane.Unset;
-            double maxArea = 0;
-            foreach (var face in brep.Faces)
-            {
-                if (!face.IsPlanar(tol * 10.0)) continue;
-                if (!face.TryGetPlane(out Plane p, tol * 10.0)) continue;
-                try
-                {
-                    using (var fb = face.DuplicateFace(false))
-                    {
-                        var amp = AreaMassProperties.Compute(fb);
-                        if (amp != null && amp.Area > maxArea)
-                        {
-                            maxArea = amp.Area;
-                            largest = face;
-                            largestPlane = p;
-                        }
-                    }
-                }
-                catch { }
-            }
-            if (largest == null)
-                throw new Exception("no twin pair and no planar face — not a recognizable plate");
-
-            Vector3d fallbackNormal = largestPlane.Normal;
-            if (!fallbackNormal.Unitize()) throw new Exception("largest-face normal degenerate");
-
-            // Project every vertex onto the normal axis; extents define thickness.
-            double minProj = double.PositiveInfinity;
-            double maxProj = double.NegativeInfinity;
-            foreach (var v in brep.Vertices)
-            {
-                var d = v.Location - largestPlane.Origin;
-                double proj = d.X * fallbackNormal.X + d.Y * fallbackNormal.Y + d.Z * fallbackNormal.Z;
-                if (proj < minProj) minProj = proj;
-                if (proj > maxProj) maxProj = proj;
-            }
-            double fallbackThickness = maxProj - minProj;
-            if (fallbackThickness < tol)
-                throw new Exception("plate thickness ≤ tolerance (fallback path)");
-
-            double midProj = (minProj + maxProj) * 0.5;
-            var fallbackMidOrigin = largestPlane.Origin + fallbackNormal * midProj;
-            var fallbackMidPlane = new Plane(fallbackMidOrigin, fallbackNormal);
-
-            return new PlateInfo
-            {
-                MidPlane = fallbackMidPlane,
-                Normal = fallbackNormal,
-                Thickness = fallbackThickness,
-            };
-        }
-
-        /// <summary>
-        /// Section a plate Brep with its mid-plane via Intersection.BrepPlane.
-        /// Returns the centerline outline curves (typically one closed curve
-        /// for a simple plate, possibly more for plates with holes).
-        /// </summary>
-        private static Curve[] SectionPlateAtMidPlane(Brep brep, Plane midPlane, double tol)
-        {
-            if (!Intersection.BrepPlane(brep, midPlane, tol, out Curve[] curves, out _))
-                return Array.Empty<Curve>();
-            return curves ?? Array.Empty<Curve>();
-        }
-
-        /// <summary>
-        /// Intersect the joint line with each outline curve; return the
-        /// topmost or bottommost hit (along <paramref name="upDir"/>).
-        /// </summary>
-        private static Point3d FindExtremeJointHit(
-            Curve[] outline, Line jointLine, Vector3d upDir, bool findTop, double tol)
-        {
-            // CurveLine expects a Line that's effectively infinite for the test.
-            // Extend the joint line generously to ensure we don't miss hits.
-            var bbox = BoundingBox.Empty;
-            foreach (var c in outline) if (c != null) bbox.Union(c.GetBoundingBox(true));
-            double extend = bbox.Diagonal.Length + 1.0;
-            var extPt0 = jointLine.From - jointLine.Direction * extend;
-            var extPt1 = jointLine.To + jointLine.Direction * extend;
-            var extLineCurve = new LineCurve(extPt0, extPt1);
-
-            bool any = false;
-            double bestScore = findTop ? double.NegativeInfinity : double.PositiveInfinity;
-            Point3d bestHit = Point3d.Origin;
-
-            foreach (var curve in outline)
-            {
-                if (curve == null) continue;
-                var ci = Intersection.CurveCurve(curve, extLineCurve, tol, tol);
-                if (ci == null) continue;
-                foreach (var evt in ci)
-                {
-                    var pt = evt.PointA;
-                    double score = pt.X * upDir.X + pt.Y * upDir.Y + pt.Z * upDir.Z;
-                    if (findTop)
-                    {
-                        if (score > bestScore) { bestScore = score; bestHit = pt; any = true; }
-                    }
-                    else
-                    {
-                        if (score < bestScore) { bestScore = score; bestHit = pt; any = true; }
-                    }
-                }
-            }
-
-            if (!any) throw new Exception(
-                findTop ? "joint line missed plate outline (top)" : "joint line missed plate outline (bottom)");
-            return bestHit;
-        }
-
-        /// <summary>
-        /// Distance along <paramref name="dir"/> from <paramref name="a"/> to
-        /// <paramref name="b"/>. Absolute value — direction-agnostic.
-        /// </summary>
-        private static double DistanceAlong(Point3d a, Point3d b, Vector3d dir)
-        {
-            return Math.Abs((b.X - a.X) * dir.X + (b.Y - a.Y) * dir.Y + (b.Z - a.Z) * dir.Z);
-        }
-
-        // ---------------------------------------------------------------
-        // Cutter builders
-        // ---------------------------------------------------------------
-
-        /// <summary>
-        /// Build the frame's compound cutter set: a rectangular slot
-        /// extending upward from the bottom anchor (so the boolean removes
-        /// material along the joint where the stringer passes through the
-        /// frame), plus a full-circle rat-hole cylinder centered ON the
-        /// frame's bottom edge (the half inside the plate body becomes the
-        /// rat-hole bite; the half outside is geometrically harmless).
-        ///
-        /// Both cutters extrude along the frame's normal by cutterDepth
-        /// centered on the mid-plane, so they punch cleanly through the
-        /// frame's full thickness.
+        /// Rat-hole-specific (stays in SeaNestRatHolesCommand). The
+        /// stringer's stadium cutter is built via the shared
+        /// <see cref="JointGeometryHelpers.BuildStadiumSlotCutter"/>.
         /// </summary>
         private static Brep[] BuildFrameCompoundCutters(
             Point3d anchor,
@@ -683,19 +448,16 @@ namespace SeaNest.Commands
             // Slot plane: X=frameWidthDir, Y=upDir, origin=anchor (on frame
             // bottom edge). Slot extends UP from the bottom edge to the joint
             // midpoint; bottom of profile sits BELOW the bottom edge by
-            // cutterDepth so the cutter cleanly overcuts past the bottom
-            // (joins the rat-hole cylinder's overcut region without leaving
-            // residual material at the very edge).
+            // cutterDepth so the cutter overcuts past the bottom and joins
+            // the rat-hole cylinder's overcut region without residual edge
+            // material.
             //
-            // Phase 20a.7.8 — frame slot is a stadium with chord at the
-            // joint center (Y = slotHeight) and dome extending PAST the
-            // chord into the stringer's body (Y = slotHeight + r). The
-            // rectangular portion's length is exactly `slotHeight` so the
-            // chord on the cut face aligns precisely with the joint
-            // midpoint. The dome is a cavity inside the stringer's solid
-            // material — it can't collide with the stringer's downward
-            // dome (which is itself a cavity inside the frame's material).
-            var slotPlane = MakeSafeCutPlane(anchor, frameWidthDir, upDir);
+            // Stadium: chord at Y = slotHeight (joint center), dome extending
+            // PAST the chord into the stringer's body (apex at Y = H + r).
+            // The dome is a cavity inside the stringer's solid material —
+            // it can't collide with the stringer's downward dome (which is
+            // itself a cavity inside the frame's material).
+            var slotPlane = JointGeometryHelpers.MakeSafeCutPlane(anchor, frameWidthDir, upDir);
             double r = slotWidth / 2.0;
             double H = slotHeight;
 
@@ -725,16 +487,13 @@ namespace SeaNest.Commands
                 poly.Append(bottom);
                 if (poly.MakeClosed(0.001))
                 {
-                    var slotCutter = ExtrudeClosedPlanarCurve(poly, frameNormal, cutterDepth);
+                    var slotCutter = JointGeometryHelpers.ExtrudeClosedPlanarCurve(poly, frameNormal, cutterDepth);
                     if (slotCutter != null) cutters.Add(slotCutter);
                 }
             }
 
             // Full-circle rat hole at the bottom anchor — rotationally
-            // symmetric, sidesteps half-circle orientation issues. Cylinder
-            // axis = frame normal; the half inside the plate body becomes
-            // the rat hole, the half outside does nothing under boolean
-            // subtraction.
+            // symmetric, sidesteps half-circle orientation issues.
             if (ratHoleRadius > tol)
             {
                 var ratHoleCircleFrame = new Plane(anchor, frameNormal);
@@ -744,229 +503,12 @@ namespace SeaNest.Commands
                 if (cylBrep != null && cylBrep.IsValid)
                 {
                     cylBrep.Translate(frameNormal * (-cutterDepth / 2.0));
-                    EnsureOutwardOrientation(cylBrep);
+                    JointGeometryHelpers.EnsureOutwardOrientation(cylBrep);
                     cutters.Add(cylBrep);
                 }
             }
 
             return cutters.ToArray();
-        }
-
-        /// <summary>
-        /// Build the stringer's stadium cutter. Open end at the stringer's
-        /// top anchor (where the frame enters from above); rounded bottom at
-        /// the joint midpoint. After boolean subtraction the stringer has a
-        /// stadium-shaped notch opening from its top edge.
-        ///
-        /// Width and length are final-dimension values from the caller (no
-        /// kerf compensation — CAM handles that at toolpath time). The
-        /// stadium extrudes along the stringer's normal by cutterDepth
-        /// centered on the mid-plane.
-        /// </summary>
-        private static Brep[] BuildStringerStadiumCutter(
-            Point3d anchor,
-            Vector3d stringerNormal,
-            Vector3d stringerWidthDir,
-            Vector3d upDir,
-            double slotWidth,
-            double slotDepth,
-            double cutterDepth,
-            double tol)
-        {
-            double r = slotWidth / 2.0;
-            double L = slotDepth;
-
-            // Stadium plane: X=stringerWidthDir (lateral), Y=upDir (along length).
-            // Stadium extends DOWN from the anchor.
-            //
-            // Phase 20a.7.8 — chord lands at Y=-L (the joint center), with
-            // the dome extending PAST the chord into the frame's body
-            // (apex at Y=-(L+r)). The rectangular portion's length is
-            // exactly L so the chord on the cut face aligns precisely with
-            // the joint midpoint, matching the frame's upward chord.
-            //
-            // Top side overcuts UP past the stringer's top edge by
-            // cutterDepth (Phase 20a.7.6) so the cutter cleanly punches
-            // through and leaves the slot open at the top.
-            var slotPlane = MakeSafeCutPlane(anchor, stringerWidthDir, upDir);
-
-            //   p0 = (-r, +cutterDepth)  top-left, above stringer top edge (overcut)
-            //   p1 = (-r, -L)            left chord endpoint at joint center
-            //   arcMid = (0, -(L + r))   apex of half-circle BEYOND the chord
-            //   p2 = (+r, -L)            right chord endpoint at joint center
-            //   p3 = (+r, +cutterDepth)  top-right, above stringer top edge
-            //   close p3 → p0            top edge (above stringer)
-            var p0 = slotPlane.PointAt(-r, +cutterDepth);
-            var p1 = slotPlane.PointAt(-r, -L);
-            var arcMid = slotPlane.PointAt(0, -(L + r));
-            var p2 = slotPlane.PointAt(+r, -L);
-            var p3 = slotPlane.PointAt(+r, +cutterDepth);
-
-            var leftSide = new LineCurve(p0, p1);
-            var bottomArc = new ArcCurve(new Arc(p1, arcMid, p2));
-            if (!bottomArc.IsValid) return Array.Empty<Brep>();
-            var rightSide = new LineCurve(p2, p3);
-            var top = new LineCurve(p3, p0);
-
-            var poly = new PolyCurve();
-            poly.Append(leftSide);
-            poly.Append(bottomArc);
-            poly.Append(rightSide);
-            poly.Append(top);
-            if (!poly.MakeClosed(0.001)) return Array.Empty<Brep>();
-
-            var cutter = ExtrudeClosedPlanarCurve(poly, stringerNormal, cutterDepth);
-            return cutter != null ? new[] { cutter } : Array.Empty<Brep>();
-        }
-
-        // ---------------------------------------------------------------
-        // Curve / plane / extrusion helpers
-        // ---------------------------------------------------------------
-
-        /// <summary>
-        /// Build a plane with explicit X / Y axes, both unitized. Right-handed:
-        /// the plane normal = xAxis × yAxis. Used so the cutter helpers don't
-        /// depend on curve-winding-derived plane normals (which flip the
-        /// extrusion direction unpredictably).
-        /// </summary>
-        private static Plane MakeSafeCutPlane(Point3d origin, Vector3d xAxis, Vector3d yAxis)
-        {
-            var x = xAxis;
-            if (!x.Unitize()) x = Vector3d.XAxis;
-            var y = yAxis;
-            if (!y.Unitize()) y = Vector3d.YAxis;
-            return new Plane(origin, x, y);
-        }
-
-        /// <summary>
-        /// Extrude a closed planar curve perpendicular to its plane along
-        /// <paramref name="extrudeDir"/> by <paramref name="depth"/>, then
-        /// translate by −extrudeDir × depth/2 so the resulting Brep is
-        /// centered on the original curve's plane.
-        ///
-        /// Uses Surface.CreateExtrusion (direction-explicit, winding-agnostic)
-        /// rather than Extrusion.Create (which derives direction from curve
-        /// winding). Caps planar ends via CapPlanarHoles so the result is a
-        /// closed manifold suitable for boolean operations.
-        /// </summary>
-        private static Brep ExtrudeClosedPlanarCurve(Curve profile, Vector3d extrudeDir, double depth)
-        {
-            if (profile == null) return null;
-            var dir = extrudeDir;
-            if (!dir.Unitize()) return null;
-            var srf = Surface.CreateExtrusion(profile, dir * depth);
-            if (srf == null) return null;
-            var brep = srf.ToBrep();
-            if (brep == null) return null;
-            brep = brep.CapPlanarHoles(0.001);
-            if (brep == null || !brep.IsValid) return null;
-            brep.Translate(dir * (-depth / 2.0));
-            // Phase 20a.7.5: ensure outward-facing normals so the cutter
-            // reads as solid (not void) to Rhino's boolean algorithm. See
-            // EnsureOutwardOrientation for why.
-            EnsureOutwardOrientation(brep);
-            return brep;
-        }
-
-        /// <summary>
-        /// Phase 20a.7.5 — verify the cutter Brep is a closed solid with
-        /// outward-pointing face normals, and Flip if inward-pointing.
-        ///
-        /// Rhino's CreateBooleanDifference treats a cutter with INWARD
-        /// normals as describing the void OUTSIDE the cutter's volume —
-        /// equivalent to subtracting "everything not the cutter" from the
-        /// part. Result: only the cutter-intersect-part sliver survives,
-        /// matching the "Δ=204" symptom (cutter ≈ 0.93 in³ but cut removed
-        /// the entire 204 in³ plate, leaving the 0.234 in³ overlap).
-        ///
-        /// Surface.CreateExtrusion + CapPlanarHoles can produce inward
-        /// orientation depending on the profile curve's winding direction
-        /// vs. the extrusion direction. Cylinder.ToBrep can do the same.
-        /// SolidOrientation == Outward is the safe state for cutters.
-        /// </summary>
-        private static void EnsureOutwardOrientation(Brep brep)
-        {
-            if (brep == null) return;
-            try
-            {
-                if (brep.SolidOrientation == BrepSolidOrientation.Inward)
-                    brep.Flip();
-            }
-            catch { }
-        }
-
-        // ---------------------------------------------------------------
-        // Boolean application
-        // ---------------------------------------------------------------
-
-        /// <summary>
-        /// Apply a list of accumulated cutters to a single part via one
-        /// Brep.CreateBooleanDifference call. Returns the largest-volume
-        /// result Brep on success, or null on failure.
-        ///
-        /// Preconditions (enforced by the caller's silent-skip): cutters is
-        /// non-null and Count &gt; 0.
-        /// </summary>
-        /// <summary>
-        /// Apply a list of accumulated cutters to a single part. Tries one
-        /// multi-cutter <see cref="Brep.CreateBooleanDifference"/> first
-        /// (fast and clean when geometry is well-behaved); on failure falls
-        /// back to sequential single-cutter cuts so a single bad cutter
-        /// doesn't take the whole batch down. Returns the largest-volume
-        /// valid result, or null if every approach fails.
-        ///
-        /// Preconditions (enforced by the caller's silent-skip): cutters is
-        /// non-null and Count &gt; 0.
-        /// </summary>
-        private static Brep ApplyCutters(Brep part, IReadOnlyList<Brep> cutters, double tol)
-        {
-            if (part == null || cutters == null || cutters.Count == 0) return null;
-
-            // Multi-cutter attempt — fastest path.
-            try
-            {
-                var multi = Brep.CreateBooleanDifference(
-                    new[] { part }, cutters.ToArray(), tol, false);
-                if (multi != null && multi.Length > 0)
-                {
-                    var best = multi.Where(b => b != null && b.IsValid)
-                                    .OrderByDescending(GetVolume)
-                                    .FirstOrDefault();
-                    if (best != null) return best;
-                }
-            }
-            catch { }
-
-            // Sequential fallback — apply cutters one at a time. Each
-            // successful cut chains into the next; failures are silently
-            // skipped so a single bad cutter doesn't void all the others.
-            Brep current = part.DuplicateBrep();
-            int seqOk = 0;
-            foreach (var cutter in cutters)
-            {
-                if (cutter == null) continue;
-                try
-                {
-                    var seq = Brep.CreateBooleanDifference(
-                        new[] { current }, new[] { cutter }, tol, false);
-                    if (seq == null || seq.Length == 0) continue;
-                    var seqBest = seq.Where(b => b != null && b.IsValid)
-                                     .OrderByDescending(GetVolume)
-                                     .FirstOrDefault();
-                    if (seqBest == null) continue;
-                    current = seqBest;
-                    seqOk++;
-                }
-                catch { }
-            }
-            return seqOk > 0 ? current : null;
-        }
-
-        private static double GetVolume(Brep brep)
-        {
-            try { var vp = VolumeMassProperties.Compute(brep); if (vp != null) return vp.Volume; } catch { }
-            try { return brep.GetBoundingBox(true).Diagonal.Length; } catch { }
-            return 0;
         }
     }
 }
