@@ -362,6 +362,16 @@ namespace SeaNest.Commands
             PlateInfo frameInfo = GetPlateInfoFromLargestPlanarFaces(frame, tol);
             PlateInfo stringerInfo = GetPlateInfoFromLargestPlanarFaces(stringer, tol);
 
+            // Phase 20a.7.1 temporary diagnostic — confirms which path
+            // (twin-pair vs fallback) was taken for each plate. Strip in
+            // Phase 20a.7.2 once verified for the user's test geometry.
+            Rhino.RhinoApp.WriteLine(string.Format(
+                "[ratHole-diag] frame plate info: midPlane normal=({0:F3},{1:F3},{2:F3}), thickness={3:G3}.",
+                frameInfo.Normal.X, frameInfo.Normal.Y, frameInfo.Normal.Z, frameInfo.Thickness));
+            Rhino.RhinoApp.WriteLine(string.Format(
+                "[ratHole-diag] stringer plate info: midPlane normal=({0:F3},{1:F3},{2:F3}), thickness={3:G3}.",
+                stringerInfo.Normal.X, stringerInfo.Normal.Y, stringerInfo.Normal.Z, stringerInfo.Thickness));
+
             Vector3d nf = frameInfo.Normal; nf.Unitize();
             Vector3d ns = stringerInfo.Normal; ns.Unitize();
 
@@ -455,21 +465,62 @@ namespace SeaNest.Commands
         }
 
         /// <summary>
-        /// Identify a thin plate's mid-plane by finding the two largest
-        /// anti-parallel planar faces. Mid-plane origin is the midpoint of
-        /// the two face origins; normal averages them. Thickness is the
-        /// perpendicular separation between the two faces.
+        /// Identify a thin plate's mid-plane.
         ///
-        /// For Phase 20a.7 simplicity, falls through on parallel-twin-not-found.
-        /// Curved hull plates (where the "twin" faces aren't quite planar) could
-        /// be handled by integrating Phase 14.1.2's FindTwinPlateFace from
-        /// BrepFlattener.cs in a follow-up if a real workflow surfaces.
+        /// Phase 20a.7.1 — primary path uses
+        /// <see cref="SeaNest.RhinoAdapters.BrepFlattener.FindTwinPlateFace"/>,
+        /// Phase 14.1.2's twin-pair detection that's already tuned for marine
+        /// plate geometry (10° anti-parallel tolerance, 0.7 area-ratio
+        /// minimum, 0.1 separation-ratio maximum). The returned `Plane` IS
+        /// the mid-plane — origin is the midpoint of the two face centroids,
+        /// normal averages the two opposing face normals. Thickness is
+        /// derived as 2× the perpendicular distance from the returned face's
+        /// centroid to the mid-plane.
+        ///
+        /// Fallback path (when twin-pair fails): use the largest planar face
+        /// and synthesize a mid-plane by computing the brep's bbox extents
+        /// along that face's normal. Mid-plane origin sits at the midpoint
+        /// of those extents. Thickness = extent range. Less robust for
+        /// non-axis-aligned or odd-shaped plates but provides a working
+        /// answer when the twin-pair criteria reject (e.g., heavily curved
+        /// plates where the two large faces aren't planar).
         /// </summary>
         private static PlateInfo GetPlateInfoFromLargestPlanarFaces(Brep brep, double tol)
         {
-            // Largest planar face.
-            BrepFace mainFace = null;
-            Plane mainPlane = Plane.Unset;
+            // Primary: Phase 14.1.2 twin-pair detection.
+            var twin = SeaNest.RhinoAdapters.BrepFlattener.FindTwinPlateFace(brep, tol);
+            if (twin != null)
+            {
+                var face = twin.Value.Face;
+                var midPlane = twin.Value.Plane;
+                Vector3d normal = midPlane.Normal;
+                if (!normal.Unitize()) throw new Exception("twin-pair mid-plane normal degenerate");
+
+                // Thickness = 2 × perpendicular distance from face centroid
+                // to the mid-plane (the twin face sits at the same distance
+                // on the other side by construction).
+                double thickness;
+                using (var faceBrep = face.DuplicateFace(false))
+                {
+                    var amp = AreaMassProperties.Compute(faceBrep);
+                    if (amp == null) throw new Exception("twin-pair face centroid failed");
+                    double signedDist = (amp.Centroid - midPlane.Origin) * normal;
+                    thickness = 2.0 * Math.Abs(signedDist);
+                }
+                if (thickness < tol)
+                    throw new Exception("twin-pair thickness ≤ tolerance");
+
+                return new PlateInfo
+                {
+                    MidPlane = midPlane,
+                    Normal = normal,
+                    Thickness = thickness,
+                };
+            }
+
+            // Fallback: largest planar face + bbox extents along its normal.
+            BrepFace largest = null;
+            Plane largestPlane = Plane.Unset;
             double maxArea = 0;
             foreach (var face in brep.Faces)
             {
@@ -483,55 +534,42 @@ namespace SeaNest.Commands
                         if (amp != null && amp.Area > maxArea)
                         {
                             maxArea = amp.Area;
-                            mainFace = face;
-                            mainPlane = p;
+                            largest = face;
+                            largestPlane = p;
                         }
                     }
                 }
                 catch { }
             }
-            if (mainFace == null)
-                throw new Exception("no planar face on this Brep");
+            if (largest == null)
+                throw new Exception("no twin pair and no planar face — not a recognizable plate");
 
-            // Anti-parallel twin face (dot product near -1).
-            BrepFace twinFace = null;
-            Plane twinPlane = Plane.Unset;
-            double bestAntiparallel = -0.9;   // require ≤ -0.9 (≈ < 26° off antiparallel)
-            foreach (var face in brep.Faces)
+            Vector3d fallbackNormal = largestPlane.Normal;
+            if (!fallbackNormal.Unitize()) throw new Exception("largest-face normal degenerate");
+
+            // Project every vertex onto the normal axis; extents define thickness.
+            double minProj = double.PositiveInfinity;
+            double maxProj = double.NegativeInfinity;
+            foreach (var v in brep.Vertices)
             {
-                if (face.FaceIndex == mainFace.FaceIndex) continue;
-                if (!face.IsPlanar(tol * 10.0)) continue;
-                if (!face.TryGetPlane(out Plane p, tol * 10.0)) continue;
-                double dot = p.Normal * mainPlane.Normal;
-                if (dot < bestAntiparallel)
-                {
-                    bestAntiparallel = dot;
-                    twinFace = face;
-                    twinPlane = p;
-                }
+                var d = v.Location - largestPlane.Origin;
+                double proj = d.X * fallbackNormal.X + d.Y * fallbackNormal.Y + d.Z * fallbackNormal.Z;
+                if (proj < minProj) minProj = proj;
+                if (proj > maxProj) maxProj = proj;
             }
-            if (twinFace == null)
-                throw new Exception("no anti-parallel twin face — plate isn't a thin sheet");
+            double fallbackThickness = maxProj - minProj;
+            if (fallbackThickness < tol)
+                throw new Exception("plate thickness ≤ tolerance (fallback path)");
 
-            // Mid-plane: average origin (projected onto the normal axis), normal = main normal.
-            Vector3d normal = mainPlane.Normal;
-            if (!normal.Unitize()) throw new Exception("plate normal degenerate");
-            Point3d midOrigin = new Point3d(
-                (mainPlane.Origin.X + twinPlane.Origin.X) * 0.5,
-                (mainPlane.Origin.Y + twinPlane.Origin.Y) * 0.5,
-                (mainPlane.Origin.Z + twinPlane.Origin.Z) * 0.5);
-            var midPlane = new Plane(midOrigin, normal);
-
-            // Thickness = absolute perpendicular separation between the two face planes.
-            double thickness = Math.Abs((twinPlane.Origin - mainPlane.Origin) * normal);
-            if (thickness < tol)
-                throw new Exception("plate thickness ≤ tolerance");
+            double midProj = (minProj + maxProj) * 0.5;
+            var fallbackMidOrigin = largestPlane.Origin + fallbackNormal * midProj;
+            var fallbackMidPlane = new Plane(fallbackMidOrigin, fallbackNormal);
 
             return new PlateInfo
             {
-                MidPlane = midPlane,
-                Normal = normal,
-                Thickness = thickness,
+                MidPlane = fallbackMidPlane,
+                Normal = fallbackNormal,
+                Thickness = fallbackThickness,
             };
         }
 

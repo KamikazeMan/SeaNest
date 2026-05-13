@@ -588,7 +588,13 @@ namespace SeaNest.RhinoAdapters
         /// <see cref="FindLargestPlanarFace"/> for surfaces, non-plate solids,
         /// or extreme plate geometries (heavy taper, asymmetric trim).
         /// </summary>
-        private static (BrepFace Face, Plane Plane)? FindTwinPlateFace(Brep brep, double tolerance)
+        // Phase 20a.7.1: internal (was private) so SeaNestRatHolesCommand can
+        // reuse the same twin-pair detection logic — Phase 14.1.2's tolerances
+        // (10° anti-parallel, 0.7 area ratio, 0.1 separation ratio) are
+        // already proven for marine plate geometry. The mid-plane between the
+        // twin pair is exactly the plate's centerline plane the joint algorithm
+        // needs.
+        internal static (BrepFace Face, Plane Plane)? FindTwinPlateFace(Brep brep, double tolerance)
         {
             // Inventory: gather (face, centroid, unit-normal, area, max-dim)
             // for every face that survives DuplicateFace + AreaMassProperties.
