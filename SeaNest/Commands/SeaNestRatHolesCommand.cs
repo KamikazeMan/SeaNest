@@ -40,16 +40,12 @@ namespace SeaNest.Commands
     {
         public override string EnglishName => "SeaNestRatHoles";
 
-        // Phase 20a — kerf compensation: SeaNest draws cuts smaller than nominal
-        // by the cutter's kerf so the cutter's swept material removal lands the
-        // final dimension on-target. Values are inches; for metric docs they're
-        // scaled at the call site via Inches→ModelUnit conversion.
-        private const double KerfRouter   = 0.250;     // 1/4"
-        private const double KerfWaterjet = 0.0625;    // 1/16"
-        private const double KerfPlasma   = 0.125;     // 1/8"
-
         // Total clearance between plate and slot. Final slot width =
-        // matingThickness + ClearanceTotal; drawn slot width = final − kerf.
+        // matingThickness + ClearanceTotal. Phase 20a.7.3 cuts FINAL
+        // dimensions (no kerf compensation) — kerf is downstream CAM's job,
+        // and pre-compensating in geometry produced unusably thin slots
+        // (e.g., 1/16" wide after Router-kerf subtraction of a 5/16"
+        // nominal) plus boolean failures from thin-vs-plate aspect ratios.
         private const double ClearanceTotal = 1.0 / 16.0;   // 1/16" total
 
         // Reject crossings less than this angle between plate and member faces
@@ -87,29 +83,16 @@ namespace SeaNest.Commands
             gw.AcceptNothing(true);
             if (gw.Get() == GetResult.Number) radius = gw.Number();
 
-            // --- Cutting method (determines kerf) ---
-            var goMethod = new GetOption();
-            goMethod.SetCommandPrompt("Cutting method");
-            int optRouter = goMethod.AddOption("Router");
-            int optWaterjet = goMethod.AddOption("Waterjet");
-            int optPlasma = goMethod.AddOption("Plasma");
-            goMethod.SetDefaultString("Plasma");
-            goMethod.AcceptNothing(true);
-            double kerf = KerfPlasma * inchScale;
-            string methodName = "Plasma";
-            if (goMethod.Get() == GetResult.Option)
-            {
-                int idx = goMethod.Option().Index;
-                if      (idx == optRouter)   { kerf = KerfRouter   * inchScale; methodName = "Router"; }
-                else if (idx == optWaterjet) { kerf = KerfWaterjet * inchScale; methodName = "Waterjet"; }
-                else if (idx == optPlasma)   { kerf = KerfPlasma   * inchScale; methodName = "Plasma"; }
-            }
-
+            // Phase 20a.7.3: no cutting-method prompt. We cut FINAL geometry
+            // dimensions and let downstream CAM software handle kerf at
+            // toolpath generation. Drop the Router/Waterjet/Plasma selection
+            // along with the kerf constants — consistent with Phase 17 export
+            // and Phase 19b scribe lines, which also don't model kerf.
             double clearance = ClearanceTotal * inchScale;
 
             RhinoApp.WriteLine(string.Format(
-                "SeaNest Rat Holes: radius {0:G3} {1}, method {2} (kerf {3:G3} {1}), clearance {4:G3} {1}.",
-                radius, unitLabel, methodName, kerf, clearance));
+                "SeaNest Rat Holes: radius {0:G3} {1}, clearance {2:G3} {1}.",
+                radius, unitLabel, clearance));
 
             // --- Select plates ---
             var goPlates = new GetObject();
@@ -213,7 +196,7 @@ namespace SeaNest.Commands
                     {
                         joint = BuildFrameStringerJointCutters(
                             plate, member,
-                            clearance, kerf, radius,
+                            clearance, radius,
                             modelTol);
                     }
                     catch (Exception ex)
@@ -354,7 +337,7 @@ namespace SeaNest.Commands
         /// </summary>
         private static JointCutResult BuildFrameStringerJointCutters(
             Brep frame, Brep stringer,
-            double clearance, double kerf, double frameRatHoleRadius,
+            double clearance, double frameRatHoleRadius,
             double tol)
         {
             Vector3d worldUp = Vector3d.ZAxis;
@@ -421,16 +404,17 @@ namespace SeaNest.Commands
             if (stringerSlotDepth <= tol)
                 throw new Exception("stringer slot depth ≤ 0");
 
-            // Slot widths: nominal = mating thickness + clearance, scaled by
+            // Slot widths: final = mating thickness + clearance, scaled by
             // 1/sinAngle for oblique crossings (the perpendicular plate thickness
-            // projects wider along the slot's width axis), then minus kerf.
-            double frameSlotWidth = (stringerInfo.Thickness + clearance) / sinAngle - kerf;
-            double stringerSlotWidth = (frameInfo.Thickness + clearance) / sinAngle - kerf;
+            // projects wider along the slot's width axis). Phase 20a.7.3: no
+            // kerf subtraction — CAM handles it at toolpath time.
+            double frameSlotWidth = (stringerInfo.Thickness + clearance) / sinAngle;
+            double stringerSlotWidth = (frameInfo.Thickness + clearance) / sinAngle;
 
             if (frameSlotWidth <= tol)
-                throw new Exception("frame slot width ≤ 0 after kerf comp");
+                throw new Exception("frame slot width ≤ 0");
             if (stringerSlotWidth <= tol)
-                throw new Exception("stringer slot width ≤ 0 after kerf comp");
+                throw new Exception("stringer slot width ≤ 0");
 
             // In-plane width axes (perpendicular to upDir, in each plate's plane).
             Vector3d frameWidthDir = Vector3d.CrossProduct(upDir, nf);
@@ -745,7 +729,8 @@ namespace SeaNest.Commands
         /// the joint midpoint. After boolean subtraction the stringer has a
         /// stadium-shaped notch opening from its top edge.
         ///
-        /// Width and length are pre-kerf-compensated by the caller. The
+        /// Width and length are final-dimension values from the caller (no
+        /// kerf compensation — CAM handles that at toolpath time). The
         /// stadium extrudes along the stringer's normal by cutterDepth
         /// centered on the mid-plane.
         /// </summary>
