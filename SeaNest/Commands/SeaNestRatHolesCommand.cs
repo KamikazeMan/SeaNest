@@ -244,7 +244,7 @@ namespace SeaNest.Commands
             for (int p = 0; p < plates.Count; p++)
             {
                 if (plateCutters[p].Count == 0) continue;
-                var result = ApplyCutters(plates[p], plateCutters[p], modelTol, string.Format("Plate {0}", p + 1));
+                var result = ApplyCutters(plates[p], plateCutters[p], modelTol);
                 if (result == null)
                 {
                     RhinoApp.WriteLine(string.Format(
@@ -269,7 +269,7 @@ namespace SeaNest.Commands
             for (int m = 0; m < members.Count; m++)
             {
                 if (memberCutters[m].Count == 0) continue;
-                var result = ApplyCutters(members[m], memberCutters[m], modelTol, string.Format("Member {0}", m + 1));
+                var result = ApplyCutters(members[m], memberCutters[m], modelTol);
                 if (result == null)
                 {
                     RhinoApp.WriteLine(string.Format(
@@ -362,16 +362,6 @@ namespace SeaNest.Commands
 
             PlateInfo frameInfo = GetPlateInfoFromLargestPlanarFaces(frame, tol);
             PlateInfo stringerInfo = GetPlateInfoFromLargestPlanarFaces(stringer, tol);
-
-            // Phase 20a.7.1 temporary diagnostic — confirms which path
-            // (twin-pair vs fallback) was taken for each plate. Strip in
-            // Phase 20a.7.2 once verified for the user's test geometry.
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag] frame plate info: midPlane normal=({0:F3},{1:F3},{2:F3}), thickness={3:G3}.",
-                frameInfo.Normal.X, frameInfo.Normal.Y, frameInfo.Normal.Z, frameInfo.Thickness));
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag] stringer plate info: midPlane normal=({0:F3},{1:F3},{2:F3}), thickness={3:G3}.",
-                stringerInfo.Normal.X, stringerInfo.Normal.Y, stringerInfo.Normal.Z, stringerInfo.Thickness));
 
             Vector3d nf = frameInfo.Normal; nf.Unitize();
             Vector3d ns = stringerInfo.Normal; ns.Unitize();
@@ -678,53 +668,62 @@ namespace SeaNest.Commands
         {
             var cutters = new List<Brep>();
 
-            // Rectangle slot, anchor at the bottom-midpoint, extending upward.
+            // Slot plane: X=frameWidthDir, Y=upDir, origin=anchor (on frame
+            // bottom edge). Slot extends UP from the bottom edge to the joint
+            // midpoint; bottom of profile sits BELOW the bottom edge by
+            // cutterDepth so the cutter cleanly overcuts past the bottom
+            // (joins the rat-hole cylinder's overcut region without leaving
+            // residual material at the very edge).
+            //
+            // Phase 20a.7.6 — frame slot is now a stadium shape (rectangle
+            // + half-circle cap at the TOP), not a plain rectangle. The cap's
+            // radius = slotWidth/2; apex at Y=slotHeight (joint midpoint, =
+            // mid-stringer-height for a centered joint). This matches the
+            // stringer's stadium (which has its rounded end at the bottom);
+            // when the two parts mate, the frame's top half-circle and the
+            // stringer's bottom half-circle meet at the joint midpoint with
+            // a smooth stress-relief.
             var slotPlane = MakeSafeCutPlane(anchor, frameWidthDir, upDir);
+            double r = slotWidth / 2.0;
+            double H = slotHeight;
+            if (H < r) H = r + 1e-4;   // height must accommodate the half-circle cap
 
-            // Phase 20a.7.2 temporary diagnostic — strip in 20a.7.3.
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag] frame cutter at anchor=({0:F2},{1:F2},{2:F2}), slotWidth={3:G3}, slotHeight={4:G3}, ratHoleRadius={5:G3}, cutterDepth={6:G3}.",
-                anchor.X, anchor.Y, anchor.Z, slotWidth, slotHeight, ratHoleRadius, cutterDepth));
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag]   frameNormal=({0:F3},{1:F3},{2:F3}), frameWidthDir=({3:F3},{4:F3},{5:F3}), upDir=({6:F3},{7:F3},{8:F3}).",
-                frameNormal.X, frameNormal.Y, frameNormal.Z,
-                frameWidthDir.X, frameWidthDir.Y, frameWidthDir.Z,
-                upDir.X, upDir.Y, upDir.Z));
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag]   slotPlane.Origin=({0:F2},{1:F2},{2:F2}), XAxis=({3:F3},{4:F3},{5:F3}), YAxis=({6:F3},{7:F3},{8:F3}), ZAxis=({9:F3},{10:F3},{11:F3}).",
-                slotPlane.Origin.X, slotPlane.Origin.Y, slotPlane.Origin.Z,
-                slotPlane.XAxis.X, slotPlane.XAxis.Y, slotPlane.XAxis.Z,
-                slotPlane.YAxis.X, slotPlane.YAxis.Y, slotPlane.YAxis.Z,
-                slotPlane.ZAxis.X, slotPlane.ZAxis.Y, slotPlane.ZAxis.Z));
+            //   p0 = (-r, -cutterDepth)  bottom-left, below frame's bottom edge
+            //   p1 = (-r, H - r)         left side meets half-circle
+            //   arcMid = (0, H)          apex of half-circle (top of slot)
+            //   p2 = (+r, H - r)         right side meets half-circle
+            //   p3 = (+r, -cutterDepth)  bottom-right
+            //   close p3 → p0            bottom edge (below frame)
+            var p0 = slotPlane.PointAt(-r, -cutterDepth);
+            var p1 = slotPlane.PointAt(-r, H - r);
+            var arcMid = slotPlane.PointAt(0, H);
+            var p2 = slotPlane.PointAt(+r, H - r);
+            var p3 = slotPlane.PointAt(+r, -cutterDepth);
 
-            var rect = MakeRectangleCurve(slotPlane, slotWidth, slotHeight);
-            if (rect != null)
+            var leftSide = new LineCurve(p0, p1);
+            var topArc = new ArcCurve(new Arc(p1, arcMid, p2));
+            if (topArc.IsValid)
             {
-                var slotCutter = ExtrudeClosedPlanarCurve(rect, frameNormal, cutterDepth);
-                if (slotCutter != null)
+                var rightSide = new LineCurve(p2, p3);
+                var bottom = new LineCurve(p3, p0);
+
+                var poly = new PolyCurve();
+                poly.Append(leftSide);
+                poly.Append(topArc);
+                poly.Append(rightSide);
+                poly.Append(bottom);
+                if (poly.MakeClosed(0.001))
                 {
-                    var bb = slotCutter.GetBoundingBox(true);
-                    Rhino.RhinoApp.WriteLine(string.Format(
-                        "[ratHole-diag]   slot cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}), orientation={6}.",
-                        bb.Diagonal.X, bb.Diagonal.Y, bb.Diagonal.Z,
-                        bb.Center.X, bb.Center.Y, bb.Center.Z,
-                        slotCutter.SolidOrientation));
-                    cutters.Add(slotCutter);
-                }
-                else
-                {
-                    Rhino.RhinoApp.WriteLine("[ratHole-diag]   slot cutter EXTRUSION FAILED.");
+                    var slotCutter = ExtrudeClosedPlanarCurve(poly, frameNormal, cutterDepth);
+                    if (slotCutter != null) cutters.Add(slotCutter);
                 }
             }
-            else
-            {
-                Rhino.RhinoApp.WriteLine("[ratHole-diag]   slot rect curve build FAILED.");
-            }
 
-            // Full-circle rat hole at the bottom anchor — sidesteps half-circle
-            // sign-orientation issues. Cylinder axis = frame normal; the half
-            // inside the plate body becomes the rat hole, the half outside
-            // does nothing under boolean subtraction.
+            // Full-circle rat hole at the bottom anchor — rotationally
+            // symmetric, sidesteps half-circle orientation issues. Cylinder
+            // axis = frame normal; the half inside the plate body becomes
+            // the rat hole, the half outside does nothing under boolean
+            // subtraction.
             if (ratHoleRadius > tol)
             {
                 var ratHoleCircleFrame = new Plane(anchor, frameNormal);
@@ -734,21 +733,8 @@ namespace SeaNest.Commands
                 if (cylBrep != null && cylBrep.IsValid)
                 {
                     cylBrep.Translate(frameNormal * (-cutterDepth / 2.0));
-                    // Phase 20a.7.5: ensure outward orientation, same as
-                    // ExtrudeClosedPlanarCurve. Cylinder.ToBrep can produce
-                    // inward-facing normals depending on internal conventions.
                     EnsureOutwardOrientation(cylBrep);
-                    var bb = cylBrep.GetBoundingBox(true);
-                    Rhino.RhinoApp.WriteLine(string.Format(
-                        "[ratHole-diag]   full-circle cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}), orientation={6}.",
-                        bb.Diagonal.X, bb.Diagonal.Y, bb.Diagonal.Z,
-                        bb.Center.X, bb.Center.Y, bb.Center.Z,
-                        cylBrep.SolidOrientation));
                     cutters.Add(cylBrep);
-                }
-                else
-                {
-                    Rhino.RhinoApp.WriteLine("[ratHole-diag]   full-circle cutter BUILD FAILED.");
                 }
             }
 
@@ -778,46 +764,29 @@ namespace SeaNest.Commands
         {
             double r = slotWidth / 2.0;
             double L = slotDepth;
-            if (L < 2 * r) L = 2 * r + 1e-4;   // length must accommodate the arc end
+            if (L < 2 * r) L = 2 * r + 1e-4;   // length must accommodate the rounded bottom
 
             // Stadium plane: X=stringerWidthDir (lateral), Y=upDir (along length).
-            // We want stadium to extend DOWN from the anchor (anchor is the top of
-            // the slot, rounded end is at the bottom). So local Y goes from 0
-            // (at anchor) to -L (rounded end deep in stringer body).
-            //
-            // ... but Y is upDir which already points toward +Z. Going to -L on
-            // Y means going DOWNWARD in world. That's what we want — the slot
-            // opens at the stringer's TOP edge (anchor) and extends down into
-            // the stringer body.
+            // Stadium extends DOWN from the anchor (Y=0 at anchor, Y=-L at the
+            // rounded bottom apex). Phase 20a.7.6 — extends UP past the
+            // stringer's top edge by cutterDepth, so the cutter cleanly
+            // overcuts the top and leaves the slot OPEN at the stringer's
+            // top edge (the prior version had the cutter's top exactly on
+            // the stringer's top edge, leaving a sealed cap of material
+            // above the slot).
             var slotPlane = MakeSafeCutPlane(anchor, stringerWidthDir, upDir);
 
-            // Phase 20a.7.2 temporary diagnostic — strip in 20a.7.3.
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag] stringer stadium at anchor=({0:F2},{1:F2},{2:F2}), slotWidth={3:G3}, slotDepth(L)={4:G3}, cutterDepth={5:G3}.",
-                anchor.X, anchor.Y, anchor.Z, slotWidth, L, cutterDepth));
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag]   stringerNormal=({0:F3},{1:F3},{2:F3}), stringerWidthDir=({3:F3},{4:F3},{5:F3}), upDir=({6:F3},{7:F3},{8:F3}).",
-                stringerNormal.X, stringerNormal.Y, stringerNormal.Z,
-                stringerWidthDir.X, stringerWidthDir.Y, stringerWidthDir.Z,
-                upDir.X, upDir.Y, upDir.Z));
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag]   slotPlane.Origin=({0:F2},{1:F2},{2:F2}), XAxis=({3:F3},{4:F3},{5:F3}), YAxis=({6:F3},{7:F3},{8:F3}), ZAxis=({9:F3},{10:F3},{11:F3}).",
-                slotPlane.Origin.X, slotPlane.Origin.Y, slotPlane.Origin.Z,
-                slotPlane.XAxis.X, slotPlane.XAxis.Y, slotPlane.XAxis.Z,
-                slotPlane.YAxis.X, slotPlane.YAxis.Y, slotPlane.YAxis.Z,
-                slotPlane.ZAxis.X, slotPlane.ZAxis.Y, slotPlane.ZAxis.Z));
-
-            //   p0 = (-r, 0)        top-left, on stringer top edge
-            //   p1 = (-r, -(L-r))   where the rounded bottom begins
-            //   arcMid = (0, -L)    apex of rounded bottom
-            //   p2 = (+r, -(L-r))   where the rounded bottom ends
-            //   p3 = (+r, 0)        top-right, on stringer top edge
-            //   back to p0          closes across the open top
-            var p0 = slotPlane.PointAt(-r, 0);
+            //   p0 = (-r, +cutterDepth)  top-left, above stringer top edge (overcut)
+            //   p1 = (-r, -(L-r))        where the rounded bottom begins
+            //   arcMid = (0, -L)         apex of rounded bottom
+            //   p2 = (+r, -(L-r))        where the rounded bottom ends
+            //   p3 = (+r, +cutterDepth)  top-right, above stringer top edge
+            //   close p3 → p0            top edge (above stringer)
+            var p0 = slotPlane.PointAt(-r, +cutterDepth);
             var p1 = slotPlane.PointAt(-r, -(L - r));
             var arcMid = slotPlane.PointAt(0, -L);
             var p2 = slotPlane.PointAt(+r, -(L - r));
-            var p3 = slotPlane.PointAt(+r, 0);
+            var p3 = slotPlane.PointAt(+r, +cutterDepth);
 
             var leftSide = new LineCurve(p0, p1);
             var bottomArc = new ArcCurve(new Arc(p1, arcMid, p2));
@@ -833,18 +802,7 @@ namespace SeaNest.Commands
             if (!poly.MakeClosed(0.001)) return Array.Empty<Brep>();
 
             var cutter = ExtrudeClosedPlanarCurve(poly, stringerNormal, cutterDepth);
-            if (cutter != null)
-            {
-                var bb = cutter.GetBoundingBox(true);
-                Rhino.RhinoApp.WriteLine(string.Format(
-                    "[ratHole-diag]   stringer stadium cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}), orientation={6}.",
-                    bb.Diagonal.X, bb.Diagonal.Y, bb.Diagonal.Z,
-                    bb.Center.X, bb.Center.Y, bb.Center.Z,
-                    cutter.SolidOrientation));
-                return new[] { cutter };
-            }
-            Rhino.RhinoApp.WriteLine("[ratHole-diag]   stringer stadium EXTRUSION FAILED.");
-            return Array.Empty<Brep>();
+            return cutter != null ? new[] { cutter } : Array.Empty<Brep>();
         }
 
         // ---------------------------------------------------------------
@@ -864,21 +822,6 @@ namespace SeaNest.Commands
             var y = yAxis;
             if (!y.Unitize()) y = Vector3d.YAxis;
             return new Plane(origin, x, y);
-        }
-
-        /// <summary>
-        /// Rectangle in plane-local coords: X from −width/2 to +width/2,
-        /// Y from 0 to height. Returns a closed PolylineCurve.
-        /// </summary>
-        private static Curve MakeRectangleCurve(Plane plane, double width, double height)
-        {
-            double hw = width / 2.0;
-            var p0 = plane.PointAt(-hw, 0);
-            var p1 = plane.PointAt(+hw, 0);
-            var p2 = plane.PointAt(+hw, height);
-            var p3 = plane.PointAt(-hw, height);
-            var poly = new Polyline { p0, p1, p2, p3, p0 };
-            return poly.ToNurbsCurve();
         }
 
         /// <summary>
@@ -950,119 +893,19 @@ namespace SeaNest.Commands
         /// Preconditions (enforced by the caller's silent-skip): cutters is
         /// non-null and Count &gt; 0.
         /// </summary>
-        private static Brep ApplyCutters(
-            Brep part, IReadOnlyList<Brep> cutters, double tol, string label)
+        private static Brep ApplyCutters(Brep part, IReadOnlyList<Brep> cutters, double tol)
         {
             if (part == null || cutters == null || cutters.Count == 0) return null;
-
-            // Phase 20a.7.2 temporary diagnostic — per-cutter validity +
-            // centroid-inside-part check + multi/sequential boolean attempts.
-            // Strip in 20a.7.3 once the failure mode is identified.
-            var partBBox = part.GetBoundingBox(true);
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag] {0}: part IsValid={1}, IsSolid={2}, bbox=[{3:F2}×{4:F2}×{5:F2}], {6} cutter(s).",
-                label, part.IsValid, part.IsSolid,
-                partBBox.Diagonal.X, partBBox.Diagonal.Y, partBBox.Diagonal.Z,
-                cutters.Count));
-
-            for (int i = 0; i < cutters.Count; i++)
-            {
-                var c = cutters[i];
-                if (c == null)
-                {
-                    Rhino.RhinoApp.WriteLine(string.Format(
-                        "[ratHole-diag] {0} cutter {1}: NULL.", label, i + 1));
-                    continue;
-                }
-                var bb = c.GetBoundingBox(true);
-                bool centroidInside = false;
-                try { centroidInside = part.IsPointInside(bb.Center, tol, false); }
-                catch { }
-                Rhino.RhinoApp.WriteLine(string.Format(
-                    "[ratHole-diag] {0} cutter {1}: IsValid={2}, IsSolid={3}, orientation={4}, bbox=[{5:F3}×{6:F3}×{7:F3}], centroid=({8:F2},{9:F2},{10:F2}), centroidInsidePart={11}.",
-                    label, i + 1, c.IsValid, c.IsSolid, c.SolidOrientation,
-                    bb.Diagonal.X, bb.Diagonal.Y, bb.Diagonal.Z,
-                    bb.Center.X, bb.Center.Y, bb.Center.Z, centroidInside));
-            }
-
-            // Multi-cutter attempt
-            Brep[] multi;
             try
             {
-                multi = Brep.CreateBooleanDifference(
+                var result = Brep.CreateBooleanDifference(
                     new[] { part }, cutters.ToArray(), tol, false);
+                if (result == null || result.Length == 0) return null;
+                return result.Where(b => b != null && b.IsValid)
+                             .OrderByDescending(GetVolume)
+                             .FirstOrDefault();
             }
-            catch (Exception ex)
-            {
-                Rhino.RhinoApp.WriteLine(string.Format(
-                    "[ratHole-diag] {0}: multi-cutter CreateBooleanDifference threw: {1}", label, ex.Message));
-                multi = null;
-            }
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag] {0}: multi-cutter → {1}.",
-                label, multi == null ? "null" : (multi.Length + " result(s)")));
-
-            if (multi != null && multi.Length > 0)
-            {
-                var best = multi.Where(b => b != null && b.IsValid)
-                                .OrderByDescending(GetVolume)
-                                .FirstOrDefault();
-                if (best != null) return best;
-            }
-
-            // Sequential fallback — apply cutters one at a time so we can tell
-            // which one broke the multi-cutter pipeline.
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag] {0}: multi-cutter failed; trying sequential cuts.", label));
-            Brep current = part.DuplicateBrep();
-            int seqOk = 0;
-            for (int i = 0; i < cutters.Count; i++)
-            {
-                Brep[] seq;
-                try
-                {
-                    seq = Brep.CreateBooleanDifference(
-                        new[] { current }, new[] { cutters[i] }, tol, false);
-                }
-                catch (Exception ex)
-                {
-                    Rhino.RhinoApp.WriteLine(string.Format(
-                        "[ratHole-diag] {0} cutter {1}: sequential threw: {2}", label, i + 1, ex.Message));
-                    seq = null;
-                }
-                if (seq == null || seq.Length == 0)
-                {
-                    Rhino.RhinoApp.WriteLine(string.Format(
-                        "[ratHole-diag] {0} cutter {1}: sequential FAILED.", label, i + 1));
-                    continue;
-                }
-                var seqBest = seq.Where(b => b != null && b.IsValid)
-                                 .OrderByDescending(GetVolume)
-                                 .FirstOrDefault();
-                if (seqBest == null)
-                {
-                    Rhino.RhinoApp.WriteLine(string.Format(
-                        "[ratHole-diag] {0} cutter {1}: sequential returned {2} brep(s), none valid.", label, i + 1, seq.Length));
-                    continue;
-                }
-                double oldV = GetVolume(current);
-                double newV = GetVolume(seqBest);
-                Rhino.RhinoApp.WriteLine(string.Format(
-                    "[ratHole-diag] {0} cutter {1}: sequential OK, vol {2:G3} → {3:G3} (Δ={4:G3}).",
-                    label, i + 1, oldV, newV, oldV - newV));
-                current = seqBest;
-                seqOk++;
-            }
-            if (seqOk > 0)
-            {
-                Rhino.RhinoApp.WriteLine(string.Format(
-                    "[ratHole-diag] {0}: sequential applied {1}/{2} cut(s) — returning partial result.",
-                    label, seqOk, cutters.Count));
-                return current;
-            }
-            Rhino.RhinoApp.WriteLine(string.Format(
-                "[ratHole-diag] {0}: ALL sequential cuts failed.", label));
-            return null;
+            catch { return null; }
         }
 
         private static double GetVolume(Brep brep)
