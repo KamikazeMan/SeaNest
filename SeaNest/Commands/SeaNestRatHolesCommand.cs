@@ -331,9 +331,24 @@ namespace SeaNest.Commands
                         if (sinAngleBetween < 0.5) sinAngleBetween = 0.5; // belt+suspenders
 
                         // Slot dimensions: nominal first, then kerf-compensated.
-                        // Nominal width = plate thickness + per-side clearance.
-                        // Drawn width = nominal − kerf (kerf removes width during cut).
-                        double nominalSlotWidth = plateThickness + 2.0 * SlotClearancePerSide;
+                        //
+                        // Phase 20a.7 — skew compensation moves from LENGTH to
+                        // WIDTH. For an oblique plate-vs-member crossing, the
+                        // plate's cross-section in the slot WIDENS by
+                        // 1/sin(angleBetween) — the diagonal slice of the
+                        // plate through the slot's width axis is wider than
+                        // the plate's perpendicular thickness. The LENGTH
+                        // (along alongMember) is the intersection-curve
+                        // length, which already tracks the plate's extent
+                        // inside the member's body and doesn't need scaling.
+                        //
+                        // Pre-20a.7 had this backwards (length /= sin, width
+                        // un-skewed). For perpendicular intersection both
+                        // were equivalent, but a 14°-from-coplanar Member 3
+                        // produced a 25"-long slot in a 6"-tall member.
+                        // Pre-20a.5 (before any fix) used loop length too
+                        // but divided by sin on the wrong dimension.
+                        double nominalSlotWidth = (plateThickness + 2.0 * SlotClearancePerSide) / sinAngleBetween;
                         double drawnSlotWidth = nominalSlotWidth - kerf;
                         if (drawnSlotWidth < modelTol)
                         {
@@ -344,17 +359,11 @@ namespace SeaNest.Commands
                             continue;
                         }
 
-                        // Phase 20a.5: stadium length = plate's cross-section
-                        // depth in the slot direction. The slot only needs to
-                        // clear the plate's thickness (plus clearance each
-                        // side); for oblique crossings the plate's projection
-                        // along alongMember grows by 1/sin(angleBetween).
-                        //
-                        // The pre-20a.5 formula was loop.GetLength()/sinAngle,
-                        // which conflated the perpendicular contact width with
-                        // the slot depth and produced 12-25"+ slot lengths for
-                        // 6"-tall members.
-                        double nominalSlotLength = (plateThickness + 2.0 * SlotClearancePerSide) / sinAngleBetween;
+                        // Slot LENGTH = intersection-curve length (the extent
+                        // of plate-vs-member overlap along the slot's depth
+                        // axis). Plate engagement into the member is exactly
+                        // this contact length.
+                        double nominalSlotLength = loop.GetLength();
                         double drawnSlotLength = nominalSlotLength - kerf;
                         if (drawnSlotLength < drawnSlotWidth)
                             drawnSlotLength = drawnSlotWidth;   // stadium length must accommodate the round end
@@ -646,6 +655,37 @@ namespace SeaNest.Commands
 
             if (!mainFace.ClosestPoint(anchor, out double u, out double v)) return null;
             anchor = mainFace.PointAt(u, v);
+
+            // Phase 20a.7 — snap the anchor onto the nearest boundary edge of
+            // the plate's main face. Without this, the anchor sits at the
+            // "lower end" of the intersection loop, which for a perpendicular
+            // T-joint lands at the member's bottom face (slightly above the
+            // plate's actual bottom edge, by some small Δ). The chord of the
+            // half-circle then misses the edge by that Δ and leaves a sliver
+            // of plate material below the rat hole. Snapping to the actual
+            // face boundary aligns the chord with the plate's edge.
+            //
+            // Restricted to mainFace's boundary edges (via DuplicateFace) so
+            // we don't accidentally snap to a thickness-edge or back-face
+            // edge that happens to be geometrically closer.
+            using (var faceBrep = mainFace.DuplicateFace(false))
+            {
+                Point3d snapped = anchor;
+                double minEdgeDist = double.MaxValue;
+                foreach (var edge in faceBrep.Edges)
+                {
+                    if (edge != null && edge.ClosestPoint(anchor, out double t))
+                    {
+                        var ptOnEdge = edge.PointAt(t);
+                        double d = anchor.DistanceTo(ptOnEdge);
+                        if (d < minEdgeDist) { minEdgeDist = d; snapped = ptOnEdge; }
+                    }
+                }
+                anchor = snapped;
+                // Re-project (u,v) for the post-snap point so the normal we
+                // sample below corresponds to the actual snapped anchor.
+                mainFace.ClosestPoint(anchor, out u, out v);
+            }
 
             var n = mainFace.NormalAt(u, v);
             if (!n.Unitize()) return null;
