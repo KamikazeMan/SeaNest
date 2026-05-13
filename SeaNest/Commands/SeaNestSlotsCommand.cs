@@ -316,25 +316,41 @@ namespace SeaNest.Commands
                 throw new Exception("member mid-plane section returned no curves");
 
             // Anchors: where the joint line crosses each outline.
-            Point3d plateBottomAnchor =
-                JointGeometryHelpers.FindExtremeJointHit(plateOutline, jointLine, upDir, findTop: false, tol);
+            // Phase 20b.2 — for watertight slot assembly, parts slide
+            // together from opposite directions. The plate's slot opens
+            // at its TOP edge (extends DOWN into the plate body); the
+            // member's slot opens at its BOTTOM edge (extends UP into the
+            // member body). They interlock at the member's mid-height.
+            //
+            // (Compare to SeaNestRatHoles, where the plate slot opens at
+            // its bottom edge and extends up — that's the
+            // assemble-from-below pattern. SeaNestSlots is
+            // assemble-from-opposing-sides, which mates the two slots'
+            // chords at the same elevation but with the parts approaching
+            // each other.)
+            Point3d plateTopAnchor =
+                JointGeometryHelpers.FindExtremeJointHit(plateOutline, jointLine, upDir, findTop: true, tol);
             Point3d memberTopAnchor =
                 JointGeometryHelpers.FindExtremeJointHit(memberOutline, jointLine, upDir, findTop: true, tol);
             Point3d memberBottomAnchor =
                 JointGeometryHelpers.FindExtremeJointHit(memberOutline, jointLine, upDir, findTop: false, tol);
 
-            Point3d jointMidPoint = new Point3d(
+            // The slot-meeting elevation is still the member's midpoint —
+            // same as SeaNestRatHoles. The member is the part that gets
+            // interrupted at mid-height; the plate cut just terminates
+            // there so the two slots' chord lines meet.
+            Point3d memberMidPoint = new Point3d(
                 (memberTopAnchor.X + memberBottomAnchor.X) * 0.5,
                 (memberTopAnchor.Y + memberBottomAnchor.Y) * 0.5,
                 (memberTopAnchor.Z + memberBottomAnchor.Z) * 0.5);
 
-            // Chord positions — both slots' rectangular portions end at
-            // the joint midpoint, with their dome caps extending past
-            // the chord into each opposing part's body.
-            double plateCutHeight = JointGeometryHelpers.DistanceAlong(plateBottomAnchor, jointMidPoint, upDir);
-            double memberSlotDepth = JointGeometryHelpers.DistanceAlong(jointMidPoint, memberTopAnchor, upDir);
+            // Chord positions:
+            //   - Plate slot extends DOWN from plateTopAnchor to memberMidPoint
+            //   - Member slot extends UP from memberBottomAnchor to memberMidPoint
+            double plateSlotDepth = JointGeometryHelpers.DistanceAlong(memberMidPoint, plateTopAnchor, upDir);
+            double memberSlotDepth = JointGeometryHelpers.DistanceAlong(memberBottomAnchor, memberMidPoint, upDir);
 
-            if (plateCutHeight <= tol) throw new Exception("plate cut height ≤ 0");
+            if (plateSlotDepth <= tol) throw new Exception("plate slot depth ≤ 0");
             if (memberSlotDepth <= tol) throw new Exception("member slot depth ≤ 0");
 
             // Slot widths: mating thickness + clearance, scaled by
@@ -356,20 +372,22 @@ namespace SeaNest.Commands
 
             // Offset each cutter's center off its part's mid-plane.
             double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
-            Point3d plateAnchorForCut = plateBottomAnchor + np * midPlaneOffset;
-            Point3d memberAnchorForCut = memberTopAnchor + nm * midPlaneOffset;
+            Point3d plateAnchorForCut = plateTopAnchor + np * midPlaneOffset;
+            Point3d memberAnchorForCut = memberBottomAnchor + nm * midPlaneOffset;
 
-            // Both slots use the shared stadium primitive. The slot
-            // extension direction differs per part:
-            //   - Plate: anchor on bottom edge, slot extends +upDir
-            //   - Member: anchor on top edge, slot extends -upDir
+            // Both slots use the shared stadium primitive. Slot-extension
+            // directions are FLIPPED from SeaNestRatHoles for the
+            // watertight assembly pattern (parts approach from opposite
+            // sides):
+            //   - Plate: anchor on top edge, slot extends -upDir (down)
+            //   - Member: anchor on bottom edge, slot extends +upDir (up)
             plateCutters = JointGeometryHelpers.BuildStadiumSlotCutter(
-                plateAnchorForCut, np, plateWidthDir, upDir,
-                plateSlotWidth, plateCutHeight,
+                plateAnchorForCut, np, plateWidthDir, -upDir,
+                plateSlotWidth, plateSlotDepth,
                 cutterDepth, tol);
 
             memberCutters = JointGeometryHelpers.BuildStadiumSlotCutter(
-                memberAnchorForCut, nm, memberWidthDir, -upDir,
+                memberAnchorForCut, nm, memberWidthDir, upDir,
                 memberSlotWidth, memberSlotDepth,
                 cutterDepth, tol);
         }
