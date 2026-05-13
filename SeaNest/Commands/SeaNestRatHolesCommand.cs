@@ -344,7 +344,17 @@ namespace SeaNest.Commands
                             continue;
                         }
 
-                        double nominalSlotLength = loop.GetLength() / sinAngleBetween + 2.0 * SlotClearancePerSide;
+                        // Phase 20a.5: stadium length = plate's cross-section
+                        // depth in the slot direction. The slot only needs to
+                        // clear the plate's thickness (plus clearance each
+                        // side); for oblique crossings the plate's projection
+                        // along alongMember grows by 1/sin(angleBetween).
+                        //
+                        // The pre-20a.5 formula was loop.GetLength()/sinAngle,
+                        // which conflated the perpendicular contact width with
+                        // the slot depth and produced 12-25"+ slot lengths for
+                        // 6"-tall members.
+                        double nominalSlotLength = (plateThickness + 2.0 * SlotClearancePerSide) / sinAngleBetween;
                         double drawnSlotLength = nominalSlotLength - kerf;
                         if (drawnSlotLength < drawnSlotWidth)
                             drawnSlotLength = drawnSlotWidth;   // stadium length must accommodate the round end
@@ -743,7 +753,16 @@ namespace SeaNest.Commands
                 if (extrusion == null) return null;
                 var brep = extrusion.ToBrep();
                 if (brep == null || !brep.IsValid) return null;
-                brep.Translate(plateNormal * (-cutterDepth / 2.0));
+                // Phase 20a.5: bbox-based centering (replaces blind
+                // Translate(plateNormal * -cutterDepth/2)). Extrusion.Create
+                // extrudes in the profile curve's normal direction, which can
+                // be +slotPlane.Normal or -slotPlane.Normal depending on the
+                // curve's winding (CW vs CCW from the +normal view). The
+                // half-circle curve here winds CW from +plateNormal, so
+                // Extrusion goes -plateNormal — the prior fixed-sign
+                // translation then double-shifted the cutter off the plate.
+                // Centering by bbox is winding-agnostic.
+                CenterAlongAxis(brep, edgeAnchor, plateNormal);
                 return brep;
             }
             catch { return null; }
@@ -809,10 +828,37 @@ namespace SeaNest.Commands
                 if (extrusion == null) return null;
                 var brep = extrusion.ToBrep();
                 if (brep == null || !brep.IsValid) return null;
-                brep.Translate(throughMember * (-cutterDepth / 2.0));
+                // Phase 20a.5: bbox-based centering, same fix as
+                // BuildHalfCircleCutter. Stadium curve winds CCW from
+                // +throughMember view (opposite of the half-circle's CW
+                // winding), so this happens to land correctly with the prior
+                // fixed-sign translation, but using CenterAlongAxis here too
+                // makes the helper winding-agnostic for future curve changes.
+                CenterAlongAxis(brep, edgeAnchor, throughMember);
                 return brep;
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Phase 20a.5 — center a cutter's bounding box on
+        /// <paramref name="anchor"/>'s projection along
+        /// <paramref name="centerAxis"/>. Robust against Extrusion.Create
+        /// extruding in either +normal or -normal direction (curve winding
+        /// determines this). In-plane axes are unaffected — only the
+        /// extrusion-axis position changes.
+        /// </summary>
+        private static void CenterAlongAxis(Brep cutter, Point3d anchor, Vector3d centerAxis)
+        {
+            if (cutter == null) return;
+            var c = cutter.GetBoundingBox(true).Center;
+            double anchorProj = anchor.X * centerAxis.X
+                              + anchor.Y * centerAxis.Y
+                              + anchor.Z * centerAxis.Z;
+            double centerProj = c.X * centerAxis.X
+                              + c.Y * centerAxis.Y
+                              + c.Z * centerAxis.Z;
+            cutter.Translate(centerAxis * (anchorProj - centerProj));
         }
 
         /// <summary>
