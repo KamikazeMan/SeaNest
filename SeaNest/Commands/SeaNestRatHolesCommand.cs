@@ -389,7 +389,7 @@ namespace SeaNest.Commands
                         }
 
                         var plateCutter = BuildHalfCircleCutter(
-                            anchorPt, plateNormal, alongPlateEdge,
+                            anchorPt, plateNormal, alongPlateEdge, plateBBox.Center,
                             drawnRadius, plateThickness * 4.0);
                         if (plateCutter == null) continue;
 
@@ -701,9 +701,9 @@ namespace SeaNest.Commands
         /// <summary>
         /// Half-circle cutter for the plate edge. Closed planar curve
         /// (semicircular arc + closing chord), extruded perpendicular to the
-        /// plate by cutterDepth, then translated by -cutterDepth/2 along the
-        /// plate normal so the cutter is centered on the plate face (and
-        /// therefore passes cleanly through the plate's full thickness).
+        /// plate by cutterDepth, then centered on the plate face via
+        /// CenterAlongAxis so the cutter passes cleanly through the plate's
+        /// full thickness.
         ///
         /// The chord lies along alongPlateEdge at the edge anchor. The arc
         /// bulges INTO the plate (perpendicular to alongPlateEdge in the plate
@@ -712,22 +712,39 @@ namespace SeaNest.Commands
         ///
         /// Drawn radius is already kerf-compensated by the caller
         /// (drawnRadius = userRadius − kerf/2).
+        ///
+        /// Phase 20a.6: <paramref name="plateBodyReference"/> (typically the
+        /// plate's bbox centroid) is used to verify intoPlate's sign. The
+        /// cross product <c>plateNormal × alongPlateEdge</c> produces a
+        /// perpendicular but its sign depends on alongPlateEdge's orientation,
+        /// which the caller computes via <c>n × faceDown</c> — not guaranteed
+        /// to point INTO the plate body. We dot-product against
+        /// (bodyReference − anchor) and flip when needed. Without this, the
+        /// half-circle bulges AWAY from the plate body and the rat hole bites
+        /// into empty space.
         /// </summary>
         private static Brep BuildHalfCircleCutter(
             Point3d edgeAnchor,
             Vector3d plateNormal,
             Vector3d alongPlateEdge,
+            Point3d plateBodyReference,
             double drawnRadius,
             double cutterDepth)
         {
             try
             {
                 // intoPlate = direction in the plate plane perpendicular to
-                // alongPlateEdge. Cross product gives a vector perpendicular to
-                // both plateNormal and alongPlateEdge — that's the in-plane
-                // perpendicular we want.
+                // alongPlateEdge. Cross product gives a perpendicular — sign
+                // depends on input orientation, so we verify and flip below.
                 var intoPlate = Vector3d.CrossProduct(plateNormal, alongPlateEdge);
                 if (!intoPlate.Unitize()) return null;
+
+                // Phase 20a.6: sign-correct so intoPlate points TOWARD the
+                // plate body. Same winding-agnostic pattern as CenterAlongAxis
+                // — don't trust the construction's sign, verify against an
+                // actual body reference.
+                if ((plateBodyReference - edgeAnchor) * intoPlate < 0)
+                    intoPlate = -intoPlate;
 
                 // Slot plane: X=alongPlateEdge, Y=intoPlate, origin=edgeAnchor.
                 // Half-circle: arc from (-r, 0) through (0, r) to (+r, 0)
