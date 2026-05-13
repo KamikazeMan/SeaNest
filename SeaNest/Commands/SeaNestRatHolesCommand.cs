@@ -395,15 +395,27 @@ namespace SeaNest.Commands
             Point3d frameAnchorForCut = frameBottomAnchor + nf * midPlaneOffset;
             Point3d stringerAnchorForCut = stringerTopAnchor + ns * midPlaneOffset;
 
-            Brep[] frameCutters = BuildFrameCompoundCutters(
+            // Phase 20b.1b: frame's stadium and member's stadium both go
+            // through the shared generic stadium-cutter primitive. The
+            // direction the slot extends from each anchor INTO the body
+            // is the only thing that differs:
+            //   - Frame: anchor on bottom edge → slot extends +upDir
+            //   - Member: anchor on top edge → slot extends -upDir
+            // Rat-hole cylinder is rat-hole-specific (BuildRatHoleCylinder
+            // below); it's added to the frame's cutter list alongside the
+            // stadium.
+            var frameStadium = JointGeometryHelpers.BuildStadiumSlotCutter(
                 frameAnchorForCut, nf, frameWidthDir, upDir,
-                frameSlotWidth, frameCutHeight, frameRatHoleRadius,
+                frameSlotWidth, frameCutHeight,
                 cutterDepth, tol);
+            var ratHole = BuildRatHoleCylinder(
+                frameAnchorForCut, nf, frameRatHoleRadius, cutterDepth, tol);
+            var frameCutters = ratHole != null
+                ? frameStadium.Concat(new[] { ratHole }).ToArray()
+                : frameStadium;
 
-            // Member-side stadium is the generic slot cutter — shared with
-            // SeaNestSlotsCommand via JointGeometryHelpers.
             Brep[] stringerCutters = JointGeometryHelpers.BuildStadiumSlotCutter(
-                stringerAnchorForCut, ns, stringerWidthDir, upDir,
+                stringerAnchorForCut, ns, stringerWidthDir, -upDir,
                 stringerSlotWidth, stringerSlotDepth,
                 cutterDepth, tol);
 
@@ -421,94 +433,33 @@ namespace SeaNest.Commands
         }
 
         /// <summary>
-        /// Build the frame's compound cutter set: a stadium-shaped slot
-        /// extending upward from the bottom anchor (rectangle + half-circle
-        /// dome cap past the chord into the stringer's body), plus a
-        /// full-circle rat-hole cylinder centered ON the frame's bottom
-        /// edge. The half of the cylinder inside the plate body becomes
-        /// the rat-hole bite; the half outside is geometrically harmless.
+        /// Build a full-circle rat-hole cylinder cutter centered on the
+        /// frame's bottom edge anchor. Rat-hole-specific (no
+        /// SeaNestSlotsCommand counterpart — slots don't include a
+        /// rat-hole).
         ///
-        /// Rat-hole-specific (stays in SeaNestRatHolesCommand). The
-        /// stringer's stadium cutter is built via the shared
-        /// <see cref="JointGeometryHelpers.BuildStadiumSlotCutter"/>.
+        /// The cylinder is rotationally symmetric, so the half inside the
+        /// plate body becomes the rat-hole bite and the half outside is
+        /// geometrically harmless. Cylinder axis = frame normal; depth =
+        /// cutterDepth (passes through the plate's full thickness with
+        /// overcut on both sides).
+        ///
+        /// Returns null on zero/sub-tolerance radius (caller treats as
+        /// "no rat-hole") or on Brep construction failure.
         /// </summary>
-        private static Brep[] BuildFrameCompoundCutters(
-            Point3d anchor,
-            Vector3d frameNormal,
-            Vector3d frameWidthDir,
-            Vector3d upDir,
-            double slotWidth,
-            double slotHeight,
-            double ratHoleRadius,
-            double cutterDepth,
-            double tol)
+        private static Brep BuildRatHoleCylinder(
+            Point3d anchor, Vector3d frameNormal,
+            double ratHoleRadius, double cutterDepth, double tol)
         {
-            var cutters = new List<Brep>();
-
-            // Slot plane: X=frameWidthDir, Y=upDir, origin=anchor (on frame
-            // bottom edge). Slot extends UP from the bottom edge to the joint
-            // midpoint; bottom of profile sits BELOW the bottom edge by
-            // cutterDepth so the cutter overcuts past the bottom and joins
-            // the rat-hole cylinder's overcut region without residual edge
-            // material.
-            //
-            // Stadium: chord at Y = slotHeight (joint center), dome extending
-            // PAST the chord into the stringer's body (apex at Y = H + r).
-            // The dome is a cavity inside the stringer's solid material —
-            // it can't collide with the stringer's downward dome (which is
-            // itself a cavity inside the frame's material).
-            var slotPlane = JointGeometryHelpers.MakeSafeCutPlane(anchor, frameWidthDir, upDir);
-            double r = slotWidth / 2.0;
-            double H = slotHeight;
-
-            //   p0 = (-r, -cutterDepth)  bottom-left, below frame's bottom edge
-            //   p1 = (-r, H)             left chord endpoint at joint center
-            //   arcMid = (0, H + r)      apex of half-circle BEYOND the chord
-            //   p2 = (+r, H)             right chord endpoint at joint center
-            //   p3 = (+r, -cutterDepth)  bottom-right
-            //   close p3 → p0            bottom edge (below frame)
-            var p0 = slotPlane.PointAt(-r, -cutterDepth);
-            var p1 = slotPlane.PointAt(-r, H);
-            var arcMid = slotPlane.PointAt(0, H + r);
-            var p2 = slotPlane.PointAt(+r, H);
-            var p3 = slotPlane.PointAt(+r, -cutterDepth);
-
-            var leftSide = new LineCurve(p0, p1);
-            var topArc = new ArcCurve(new Arc(p1, arcMid, p2));
-            if (topArc.IsValid)
-            {
-                var rightSide = new LineCurve(p2, p3);
-                var bottom = new LineCurve(p3, p0);
-
-                var poly = new PolyCurve();
-                poly.Append(leftSide);
-                poly.Append(topArc);
-                poly.Append(rightSide);
-                poly.Append(bottom);
-                if (poly.MakeClosed(0.001))
-                {
-                    var slotCutter = JointGeometryHelpers.ExtrudeClosedPlanarCurve(poly, frameNormal, cutterDepth);
-                    if (slotCutter != null) cutters.Add(slotCutter);
-                }
-            }
-
-            // Full-circle rat hole at the bottom anchor — rotationally
-            // symmetric, sidesteps half-circle orientation issues.
-            if (ratHoleRadius > tol)
-            {
-                var ratHoleCircleFrame = new Plane(anchor, frameNormal);
-                var circle = new Circle(ratHoleCircleFrame, ratHoleRadius);
-                var cyl = new Cylinder(circle, cutterDepth);
-                var cylBrep = cyl.ToBrep(true, true);
-                if (cylBrep != null && cylBrep.IsValid)
-                {
-                    cylBrep.Translate(frameNormal * (-cutterDepth / 2.0));
-                    JointGeometryHelpers.EnsureOutwardOrientation(cylBrep);
-                    cutters.Add(cylBrep);
-                }
-            }
-
-            return cutters.ToArray();
+            if (ratHoleRadius <= tol) return null;
+            var circlePlane = new Plane(anchor, frameNormal);
+            var circle = new Circle(circlePlane, ratHoleRadius);
+            var cyl = new Cylinder(circle, cutterDepth);
+            var cylBrep = cyl.ToBrep(true, true);
+            if (cylBrep == null || !cylBrep.IsValid) return null;
+            cylBrep.Translate(frameNormal * (-cutterDepth / 2.0));
+            JointGeometryHelpers.EnsureOutwardOrientation(cylBrep);
+            return cylBrep;
         }
     }
 }

@@ -216,27 +216,37 @@ namespace SeaNest.Geometry
         // ---------------------------------------------------------------
 
         /// <summary>
-        /// Build a stadium-shaped slot cutter (rectangle with rounded
-        /// bottom past the chord) extruded perpendicular to the member's
-        /// face. The chord ends at Y=−L on the slot plane; the dome
-        /// extends past the chord to Y=−(L+r), where r = slotWidth/2.
-        /// The top edge of the rectangle overcuts UP past the member's
-        /// edge by cutterDepth so the slot opens cleanly at the top.
+        /// Build a stadium-shaped slot cutter (rectangle with rounded dome
+        /// past the chord) extruded perpendicular to the plate's face.
         ///
-        /// Cutter is extruded along <paramref name="memberNormal"/> by
-        /// <paramref name="cutterDepth"/> and centered on the member's
+        /// Profile geometry, in slotPlane local coords (X=plateWidthDir,
+        /// Y=slotExtensionDir, origin=anchor):
+        ///   chord at Y = +slotDepth (joint center)
+        ///   dome apex at Y = +(slotDepth + r), where r = slotWidth/2
+        ///   open end at Y = -cutterDepth (past the plate's edge for clean
+        ///     overcut)
+        ///
+        /// The caller picks <paramref name="slotExtensionDir"/> to point
+        /// from the anchor INTO the plate body — for a frame whose anchor
+        /// sits on its bottom edge, that's +upDir; for a member whose
+        /// anchor sits on its top edge, that's −upDir.
+        ///
+        /// Phase 20b.1: refactored to take an explicit slotExtensionDir
+        /// (replaces the prior implicit "always extend in -Y of slotPlane"
+        /// convention). Single primitive now handles both frame-side (slot
+        /// extends up from bottom edge) and member-side (slot extends down
+        /// from top edge) cases; SeaNestSlotsCommand uses it for both
+        /// parts in its symmetric dual-cut watertight joint.
+        ///
+        /// Cutter is extruded along <paramref name="plateNormal"/> by
+        /// <paramref name="cutterDepth"/> and centered on the plate's
         /// mid-plane via <see cref="ExtrudeClosedPlanarCurve"/>.
-        ///
-        /// Used by both SeaNestRatHolesCommand (member-side slot for the
-        /// stringer in a dual-cut joint) and SeaNestSlotsCommand
-        /// (member-only slot for a watertight joint where the plate
-        /// stays solid).
         /// </summary>
         public static Brep[] BuildStadiumSlotCutter(
             Point3d anchor,
-            Vector3d memberNormal,
-            Vector3d memberWidthDir,
-            Vector3d upDir,
+            Vector3d plateNormal,
+            Vector3d plateWidthDir,
+            Vector3d slotExtensionDir,
             double slotWidth,
             double slotDepth,
             double cutterDepth,
@@ -245,34 +255,34 @@ namespace SeaNest.Geometry
             double r = slotWidth / 2.0;
             double L = slotDepth;
 
-            var slotPlane = MakeSafeCutPlane(anchor, memberWidthDir, upDir);
+            var slotPlane = MakeSafeCutPlane(anchor, plateWidthDir, slotExtensionDir);
 
-            //   p0 = (-r, +cutterDepth)  top-left, above member's top edge (overcut)
-            //   p1 = (-r, -L)            left chord endpoint at joint center
-            //   arcMid = (0, -(L + r))   apex of half-circle BEYOND the chord
-            //   p2 = (+r, -L)            right chord endpoint at joint center
-            //   p3 = (+r, +cutterDepth)  top-right, above member's top edge
-            //   close p3 → p0            top edge (above member)
-            var p0 = slotPlane.PointAt(-r, +cutterDepth);
-            var p1 = slotPlane.PointAt(-r, -L);
-            var arcMid = slotPlane.PointAt(0, -(L + r));
-            var p2 = slotPlane.PointAt(+r, -L);
-            var p3 = slotPlane.PointAt(+r, +cutterDepth);
+            //   p0 = (-r, -cutterDepth)  open end, past plate edge in -extension direction
+            //   p1 = (-r, +L)            left chord endpoint at joint center
+            //   arcMid = (0, +(L + r))   apex of half-circle BEYOND the chord
+            //   p2 = (+r, +L)            right chord endpoint at joint center
+            //   p3 = (+r, -cutterDepth)  open end, past plate edge
+            //   close p3 → p0            open-end edge (past the plate's surface)
+            var p0 = slotPlane.PointAt(-r, -cutterDepth);
+            var p1 = slotPlane.PointAt(-r, +L);
+            var arcMid = slotPlane.PointAt(0, +(L + r));
+            var p2 = slotPlane.PointAt(+r, +L);
+            var p3 = slotPlane.PointAt(+r, -cutterDepth);
 
             var leftSide = new LineCurve(p0, p1);
-            var bottomArc = new ArcCurve(new Arc(p1, arcMid, p2));
-            if (!bottomArc.IsValid) return Array.Empty<Brep>();
+            var topArc = new ArcCurve(new Arc(p1, arcMid, p2));
+            if (!topArc.IsValid) return Array.Empty<Brep>();
             var rightSide = new LineCurve(p2, p3);
-            var top = new LineCurve(p3, p0);
+            var openEdge = new LineCurve(p3, p0);
 
             var poly = new PolyCurve();
             poly.Append(leftSide);
-            poly.Append(bottomArc);
+            poly.Append(topArc);
             poly.Append(rightSide);
-            poly.Append(top);
+            poly.Append(openEdge);
             if (!poly.MakeClosed(0.001)) return Array.Empty<Brep>();
 
-            var cutter = ExtrudeClosedPlanarCurve(poly, memberNormal, cutterDepth);
+            var cutter = ExtrudeClosedPlanarCurve(poly, plateNormal, cutterDepth);
             return cutter != null ? new[] { cutter } : Array.Empty<Brep>();
         }
 
