@@ -48,15 +48,12 @@ namespace SeaNest.Commands
         // nominal) plus boolean failures from thin-vs-plate aspect ratios.
         private const double ClearanceTotal = 1.0 / 16.0;   // 1/16" total
 
-        // Phase 20a.7.7 — assembly-fit clearance between frame's upward
-        // dome and stringer's downward dome at the joint center. Without it,
-        // the two domes meet exactly at the midpoint plane and the parts
-        // bottom out before seating. Splitting half the clearance into each
-        // cut (frame's stadium overshoots midpoint by +half, stringer's by
-        // -half) leaves a total gap of AssemblyClearance between the two
-        // dome surfaces. 1/16" is the marine standard for hand-fit assembly
-        // tolerance.
-        private const double AssemblyClearance = 0.0625;   // 1/16"
+        // Phase 20a.7.8: AssemblyClearance const removed. The dome caps now
+        // extend PAST the chord into solid material (each side's cut goes
+        // a half-circle beyond the joint centerline). Both chord lines
+        // land exactly at the joint center — even and aligned — and the
+        // domes themselves are cavities inside their parent solids, so
+        // they never physically collide regardless of fit tolerance.
 
         // Reject crossings less than this angle between plate and member faces
         // (i.e. when sin(angleBetween) < 0.05 ≈ 3°). Below this the slot
@@ -117,11 +114,10 @@ namespace SeaNest.Commands
             // along with the kerf constants — consistent with Phase 17 export
             // and Phase 19b scribe lines, which also don't model kerf.
             double clearance = ClearanceTotal * inchScale;
-            double assemblyClearance = AssemblyClearance * inchScale;
 
             RhinoApp.WriteLine(string.Format(
-                "SeaNest Rat Holes: radius {0:G3} {1}, clearance {2:G3} {1}, assembly gap {3:G3} {1}.",
-                radius, unitLabel, clearance, assemblyClearance));
+                "SeaNest Rat Holes: radius {0:G3} {1}, clearance {2:G3} {1}.",
+                radius, unitLabel, clearance));
 
             // --- Select plates ---
             var goPlates = new GetObject();
@@ -225,7 +221,7 @@ namespace SeaNest.Commands
                     {
                         joint = BuildFrameStringerJointCutters(
                             plate, member,
-                            clearance, assemblyClearance, radius,
+                            clearance, radius,
                             modelTol);
                     }
                     catch (Exception ex)
@@ -366,7 +362,7 @@ namespace SeaNest.Commands
         /// </summary>
         private static JointCutResult BuildFrameStringerJointCutters(
             Brep frame, Brep stringer,
-            double clearance, double assemblyClearance, double frameRatHoleRadius,
+            double clearance, double frameRatHoleRadius,
             double tol)
         {
             Vector3d worldUp = Vector3d.ZAxis;
@@ -414,15 +410,14 @@ namespace SeaNest.Commands
                 (stringerTopAnchor.Y + stringerBottomAnchor.Y) * 0.5,
                 (stringerTopAnchor.Z + stringerBottomAnchor.Z) * 0.5);
 
-            // Cut heights along the joint centerline. Phase 20a.7.7 — each
-            // cut overshoots the stringer midpoint by half the assembly
-            // clearance, leaving a total gap of `assemblyClearance` between
-            // the frame's upward dome and the stringer's downward dome so
-            // the parts don't bottom out at the joint center during
-            // hand-fit assembly.
-            double halfClearance = assemblyClearance * 0.5;
-            double frameCutHeight = DistanceAlong(frameBottomAnchor, stringerMidPoint, upDir) + halfClearance;
-            double stringerSlotDepth = DistanceAlong(stringerMidPoint, stringerTopAnchor, upDir) + halfClearance;
+            // Cut heights along the joint centerline. Phase 20a.7.8 — these
+            // are CHORD positions (where each stadium's straight portion
+            // ends and the dome cap begins), NOT the dome apex. Each
+            // dome extends past its chord into solid material on the far
+            // side of the joint center. Both chords land at the joint
+            // center, evenly aligned.
+            double frameCutHeight = DistanceAlong(frameBottomAnchor, stringerMidPoint, upDir);
+            double stringerSlotDepth = DistanceAlong(stringerMidPoint, stringerTopAnchor, upDir);
 
             if (frameCutHeight <= tol)
                 throw new Exception("frame cut height ≤ 0");
@@ -692,29 +687,28 @@ namespace SeaNest.Commands
             // (joins the rat-hole cylinder's overcut region without leaving
             // residual material at the very edge).
             //
-            // Phase 20a.7.6 — frame slot is now a stadium shape (rectangle
-            // + half-circle cap at the TOP), not a plain rectangle. The cap's
-            // radius = slotWidth/2; apex at Y=slotHeight (joint midpoint, =
-            // mid-stringer-height for a centered joint). This matches the
-            // stringer's stadium (which has its rounded end at the bottom);
-            // when the two parts mate, the frame's top half-circle and the
-            // stringer's bottom half-circle meet at the joint midpoint with
-            // a smooth stress-relief.
+            // Phase 20a.7.8 — frame slot is a stadium with chord at the
+            // joint center (Y = slotHeight) and dome extending PAST the
+            // chord into the stringer's body (Y = slotHeight + r). The
+            // rectangular portion's length is exactly `slotHeight` so the
+            // chord on the cut face aligns precisely with the joint
+            // midpoint. The dome is a cavity inside the stringer's solid
+            // material — it can't collide with the stringer's downward
+            // dome (which is itself a cavity inside the frame's material).
             var slotPlane = MakeSafeCutPlane(anchor, frameWidthDir, upDir);
             double r = slotWidth / 2.0;
             double H = slotHeight;
-            if (H < r) H = r + 1e-4;   // height must accommodate the half-circle cap
 
             //   p0 = (-r, -cutterDepth)  bottom-left, below frame's bottom edge
-            //   p1 = (-r, H - r)         left side meets half-circle
-            //   arcMid = (0, H)          apex of half-circle (top of slot)
-            //   p2 = (+r, H - r)         right side meets half-circle
+            //   p1 = (-r, H)             left chord endpoint at joint center
+            //   arcMid = (0, H + r)      apex of half-circle BEYOND the chord
+            //   p2 = (+r, H)             right chord endpoint at joint center
             //   p3 = (+r, -cutterDepth)  bottom-right
             //   close p3 → p0            bottom edge (below frame)
             var p0 = slotPlane.PointAt(-r, -cutterDepth);
-            var p1 = slotPlane.PointAt(-r, H - r);
-            var arcMid = slotPlane.PointAt(0, H);
-            var p2 = slotPlane.PointAt(+r, H - r);
+            var p1 = slotPlane.PointAt(-r, H);
+            var arcMid = slotPlane.PointAt(0, H + r);
+            var p2 = slotPlane.PointAt(+r, H);
             var p3 = slotPlane.PointAt(+r, -cutterDepth);
 
             var leftSide = new LineCurve(p0, p1);
@@ -781,28 +775,31 @@ namespace SeaNest.Commands
         {
             double r = slotWidth / 2.0;
             double L = slotDepth;
-            if (L < 2 * r) L = 2 * r + 1e-4;   // length must accommodate the rounded bottom
 
             // Stadium plane: X=stringerWidthDir (lateral), Y=upDir (along length).
-            // Stadium extends DOWN from the anchor (Y=0 at anchor, Y=-L at the
-            // rounded bottom apex). Phase 20a.7.6 — extends UP past the
-            // stringer's top edge by cutterDepth, so the cutter cleanly
-            // overcuts the top and leaves the slot OPEN at the stringer's
-            // top edge (the prior version had the cutter's top exactly on
-            // the stringer's top edge, leaving a sealed cap of material
-            // above the slot).
+            // Stadium extends DOWN from the anchor.
+            //
+            // Phase 20a.7.8 — chord lands at Y=-L (the joint center), with
+            // the dome extending PAST the chord into the frame's body
+            // (apex at Y=-(L+r)). The rectangular portion's length is
+            // exactly L so the chord on the cut face aligns precisely with
+            // the joint midpoint, matching the frame's upward chord.
+            //
+            // Top side overcuts UP past the stringer's top edge by
+            // cutterDepth (Phase 20a.7.6) so the cutter cleanly punches
+            // through and leaves the slot open at the top.
             var slotPlane = MakeSafeCutPlane(anchor, stringerWidthDir, upDir);
 
             //   p0 = (-r, +cutterDepth)  top-left, above stringer top edge (overcut)
-            //   p1 = (-r, -(L-r))        where the rounded bottom begins
-            //   arcMid = (0, -L)         apex of rounded bottom
-            //   p2 = (+r, -(L-r))        where the rounded bottom ends
+            //   p1 = (-r, -L)            left chord endpoint at joint center
+            //   arcMid = (0, -(L + r))   apex of half-circle BEYOND the chord
+            //   p2 = (+r, -L)            right chord endpoint at joint center
             //   p3 = (+r, +cutterDepth)  top-right, above stringer top edge
             //   close p3 → p0            top edge (above stringer)
             var p0 = slotPlane.PointAt(-r, +cutterDepth);
-            var p1 = slotPlane.PointAt(-r, -(L - r));
-            var arcMid = slotPlane.PointAt(0, -L);
-            var p2 = slotPlane.PointAt(+r, -(L - r));
+            var p1 = slotPlane.PointAt(-r, -L);
+            var arcMid = slotPlane.PointAt(0, -(L + r));
+            var p2 = slotPlane.PointAt(+r, -L);
             var p3 = slotPlane.PointAt(+r, +cutterDepth);
 
             var leftSide = new LineCurve(p0, p1);
