@@ -161,8 +161,14 @@ namespace SeaNest.Geometry
         /// Joint line is extended to cover each outline's bbox so we
         /// don't miss hits because the input <see cref="Line"/> happens
         /// to be a short segment.
+        ///
+        /// Returns <c>null</c> when no hit is found — the caller is
+        /// expected to fall back to
+        /// <see cref="FindExtremeIntersectionPoint"/> (Phase 20c.1) for
+        /// curved parts whose mid-plane outline doesn't represent where
+        /// the actual contact happens.
         /// </summary>
-        public static Point3d FindExtremeJointHit(
+        public static Point3d? FindExtremeJointHit(
             Curve[] outline, Line jointLine, Vector3d upDir, bool findTop, double tol)
         {
             var bbox = BoundingBox.Empty;
@@ -196,9 +202,73 @@ namespace SeaNest.Geometry
                 }
             }
 
-            if (!any) throw new Exception(
-                findTop ? "joint line missed plate outline (top)" : "joint line missed plate outline (bottom)");
-            return bestHit;
+            return any ? bestHit : (Point3d?)null;
+        }
+
+        /// <summary>
+        /// Phase 20c.1 — fallback anchor finder for curved parts whose
+        /// mid-plane outline misses the joint line. Intersects the two
+        /// parts directly via <c>Intersection.BrepBrep</c>, samples each
+        /// resulting intersection curve, and returns the extreme point
+        /// along <paramref name="alongAxis"/> (max if
+        /// <paramref name="findHigh"/>, min otherwise).
+        ///
+        /// Used when <see cref="FindExtremeJointHit"/> returns null —
+        /// typically because the member is curved enough that its
+        /// mid-plane average doesn't represent where the actual contact
+        /// happens. BrepBrep operates on the actual surfaces, so the
+        /// fallback finds the real engagement point regardless of
+        /// curvature.
+        ///
+        /// Returns null when no intersection exists between the two
+        /// parts (parts genuinely don't touch — caller skips the pair).
+        /// </summary>
+        public static Point3d? FindExtremeIntersectionPoint(
+            Brep partA, Brep partB,
+            Vector3d alongAxis,
+            bool findHigh,
+            double tol)
+        {
+            if (partA == null || partB == null) return null;
+
+            Curve[] curves;
+            bool ok;
+            try
+            {
+                ok = Intersection.BrepBrep(partA, partB, tol, out curves, out _);
+            }
+            catch
+            {
+                return null;
+            }
+            if (!ok || curves == null || curves.Length == 0) return null;
+
+            const int SamplesPerCurve = 100;
+            bool any = false;
+            double bestScore = findHigh ? double.NegativeInfinity : double.PositiveInfinity;
+            Point3d bestPoint = Point3d.Origin;
+
+            foreach (var curve in curves)
+            {
+                if (curve == null) continue;
+                var domain = curve.Domain;
+                for (int i = 0; i <= SamplesPerCurve; i++)
+                {
+                    double t = domain.T0 + (domain.T1 - domain.T0) * i / SamplesPerCurve;
+                    var pt = curve.PointAt(t);
+                    double score = pt.X * alongAxis.X + pt.Y * alongAxis.Y + pt.Z * alongAxis.Z;
+                    if (findHigh)
+                    {
+                        if (score > bestScore) { bestScore = score; bestPoint = pt; any = true; }
+                    }
+                    else
+                    {
+                        if (score < bestScore) { bestScore = score; bestPoint = pt; any = true; }
+                    }
+                }
+            }
+
+            return any ? bestPoint : (Point3d?)null;
         }
 
         /// <summary>

@@ -328,12 +328,19 @@ namespace SeaNest.Commands
             // assemble-from-opposing-sides, which mates the two slots'
             // chords at the same elevation but with the parts approaching
             // each other.)
+            // Phase 20c.1: each anchor lookup falls back to BrepBrep
+            // intersection if the mid-plane outline misses (curved
+            // members whose mid-plane average doesn't reflect the actual
+            // contact).
             Point3d plateTopAnchor =
-                JointGeometryHelpers.FindExtremeJointHit(plateOutline, jointLine, upDir, findTop: true, tol);
+                ResolveAnchorWithFallback(plateOutline, jointLine, upDir, findTop: true,
+                    plate, member, "plate", "top", tol);
             Point3d memberTopAnchor =
-                JointGeometryHelpers.FindExtremeJointHit(memberOutline, jointLine, upDir, findTop: true, tol);
+                ResolveAnchorWithFallback(memberOutline, jointLine, upDir, findTop: true,
+                    member, plate, "member", "top", tol);
             Point3d memberBottomAnchor =
-                JointGeometryHelpers.FindExtremeJointHit(memberOutline, jointLine, upDir, findTop: false, tol);
+                ResolveAnchorWithFallback(memberOutline, jointLine, upDir, findTop: false,
+                    member, plate, "member", "bottom", tol);
 
             // The slot-meeting elevation is still the member's midpoint —
             // same as SeaNestRatHoles. The member is the part that gets
@@ -390,6 +397,38 @@ namespace SeaNest.Commands
                 memberAnchorForCut, nm, memberWidthDir, upDir,
                 memberSlotWidth, memberSlotDepth,
                 cutterDepth, tol);
+        }
+
+        /// <summary>
+        /// Phase 20c.1 — resolve a joint anchor via the mid-plane outline
+        /// primary; on miss, log + fall back to BrepBrep intersection
+        /// between the two parts. Throws when both fail (caught by the
+        /// per-pair loop which logs the skip with plate/member indices).
+        ///
+        /// <paramref name="anchorPart"/> is the part whose anchor we
+        /// want; <paramref name="otherPart"/> is the part it touches.
+        /// </summary>
+        private static Point3d ResolveAnchorWithFallback(
+            Curve[] outline, Line jointLine, Vector3d upDir, bool findTop,
+            Brep anchorPart, Brep otherPart,
+            string partLabel, string positionLabel,
+            double tol)
+        {
+            var primary = JointGeometryHelpers.FindExtremeJointHit(
+                outline, jointLine, upDir, findTop, tol);
+            if (primary.HasValue) return primary.Value;
+
+            RhinoApp.WriteLine(string.Format(
+                "    joint line missed {0} outline ({1}) — attempting BrepBrep fallback.",
+                partLabel, positionLabel));
+
+            var fallback = JointGeometryHelpers.FindExtremeIntersectionPoint(
+                anchorPart, otherPart, upDir, findHigh: findTop, tol);
+            if (fallback.HasValue) return fallback.Value;
+
+            throw new Exception(string.Format(
+                "BrepBrep fallback also failed ({0} {1} anchor)",
+                partLabel, positionLabel));
         }
     }
 }

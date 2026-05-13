@@ -349,12 +349,19 @@ namespace SeaNest.Commands
                 throw new Exception("stringer mid-plane section returned no curves");
 
             // Anchors: where the joint line crosses each outline.
+            // Phase 20c.1: each anchor lookup falls back to BrepBrep
+            // intersection if the mid-plane outline misses (curved members
+            // whose mid-plane average doesn't reflect where the actual
+            // contact occurs).
             Point3d frameBottomAnchor =
-                JointGeometryHelpers.FindExtremeJointHit(frameOutline, jointLine, upDir, findTop: false, tol);
+                ResolveAnchorWithFallback(frameOutline, jointLine, upDir, findTop: false,
+                    frame, stringer, "frame", "bottom", tol);
             Point3d stringerTopAnchor =
-                JointGeometryHelpers.FindExtremeJointHit(stringerOutline, jointLine, upDir, findTop: true, tol);
+                ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: true,
+                    stringer, frame, "stringer", "top", tol);
             Point3d stringerBottomAnchor =
-                JointGeometryHelpers.FindExtremeJointHit(stringerOutline, jointLine, upDir, findTop: false, tol);
+                ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: false,
+                    stringer, frame, "stringer", "bottom", tol);
 
             Point3d stringerMidPoint = new Point3d(
                 (stringerTopAnchor.X + stringerBottomAnchor.X) * 0.5,
@@ -460,6 +467,41 @@ namespace SeaNest.Commands
             cylBrep.Translate(frameNormal * (-cutterDepth / 2.0));
             JointGeometryHelpers.EnsureOutwardOrientation(cylBrep);
             return cylBrep;
+        }
+
+        /// <summary>
+        /// Phase 20c.1 — resolve a joint anchor via the mid-plane outline
+        /// primary; on miss, log + fall back to BrepBrep intersection
+        /// between the two parts. Throws when both fail (caught by the
+        /// per-pair loop which logs the skip with plate/member indices).
+        ///
+        /// <paramref name="anchorPart"/> is the part whose anchor we
+        /// want; <paramref name="otherPart"/> is the part it touches.
+        /// The fallback uses BrepBrep on those two parts (symmetric, but
+        /// the labels in the diagnostic refer to <paramref name="partLabel"/>
+        /// and <paramref name="positionLabel"/>).
+        /// </summary>
+        private static Point3d ResolveAnchorWithFallback(
+            Curve[] outline, Line jointLine, Vector3d upDir, bool findTop,
+            Brep anchorPart, Brep otherPart,
+            string partLabel, string positionLabel,
+            double tol)
+        {
+            var primary = JointGeometryHelpers.FindExtremeJointHit(
+                outline, jointLine, upDir, findTop, tol);
+            if (primary.HasValue) return primary.Value;
+
+            RhinoApp.WriteLine(string.Format(
+                "    joint line missed {0} outline ({1}) — attempting BrepBrep fallback.",
+                partLabel, positionLabel));
+
+            var fallback = JointGeometryHelpers.FindExtremeIntersectionPoint(
+                anchorPart, otherPart, upDir, findHigh: findTop, tol);
+            if (fallback.HasValue) return fallback.Value;
+
+            throw new Exception(string.Format(
+                "BrepBrep fallback also failed ({0} {1} anchor)",
+                partLabel, positionLabel));
         }
     }
 }
