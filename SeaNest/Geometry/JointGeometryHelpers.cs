@@ -164,7 +164,7 @@ namespace SeaNest.Geometry
         ///
         /// Returns <c>null</c> when no hit is found — the caller is
         /// expected to fall back to
-        /// <see cref="FindExtremeIntersectionPoint"/> (Phase 20c.1) for
+        /// <see cref="FindExtremeIntersectionNearJointLine"/> (Phase 20c.2) for
         /// curved parts whose mid-plane outline doesn't represent where
         /// the actual contact happens.
         /// </summary>
@@ -206,30 +206,44 @@ namespace SeaNest.Geometry
         }
 
         /// <summary>
-        /// Phase 20c.1 — fallback anchor finder for curved parts whose
-        /// mid-plane outline misses the joint line. Intersects the two
-        /// parts directly via <c>Intersection.BrepBrep</c>, samples each
-        /// resulting intersection curve, and returns the extreme point
-        /// along <paramref name="alongAxis"/> (max if
-        /// <paramref name="findHigh"/>, min otherwise).
+        /// Phase 20c.2 — fallback anchor finder that filters BrepBrep
+        /// intersection results to ones NEAR a reference joint line.
         ///
-        /// Used when <see cref="FindExtremeJointHit"/> returns null —
-        /// typically because the member is curved enough that its
-        /// mid-plane average doesn't represent where the actual contact
-        /// happens. BrepBrep operates on the actual surfaces, so the
-        /// fallback finds the real engagement point regardless of
-        /// curvature.
+        /// Replaces Phase 20c.1's unfiltered <c>FindExtremeIntersectionPoint</c> (no longer present),
+        /// which produced spurious anchors for curved members: at plate
+        /// positions where the member's centerline didn't actually cross
+        /// the plate but the solid bodies brushed against each other,
+        /// the unfiltered version returned the brush-contact point as a
+        /// "joint" and the algorithm built cuts there.
         ///
-        /// Returns null when no intersection exists between the two
-        /// parts (parts genuinely don't touch — caller skips the pair).
+        /// Mechanics: <c>Intersection.BrepBrep(partA, partB)</c> produces
+        /// candidate intersection curves. For each curve, sample evenly
+        /// and reject samples whose perpendicular distance to
+        /// <paramref name="jointLine"/> exceeds
+        /// <paramref name="maxDistanceFromJointLine"/>. Among the
+        /// survivors, return the extreme along
+        /// <paramref name="alongAxis"/> (max if
+        /// <paramref name="findHigh"/>, min otherwise). Returns null if
+        /// no sample survives — that's the signal that no real joint
+        /// exists at this pair and the dispatch should skip.
+        ///
+        /// <paramref name="jointLine"/> is the mid-plane joint centerline.
+        /// Even when its outline-intersection fails (curved member's
+        /// mid-plane outline doesn't bound where the actual contact
+        /// happens), the line itself remains a valid "where the joint
+        /// should be" reference — proximity to it screens out spurious
+        /// brush-contacts.
         /// </summary>
-        public static Point3d? FindExtremeIntersectionPoint(
+        public static Point3d? FindExtremeIntersectionNearJointLine(
             Brep partA, Brep partB,
             Vector3d alongAxis,
             bool findHigh,
+            Line jointLine,
+            double maxDistanceFromJointLine,
             double tol)
         {
             if (partA == null || partB == null) return null;
+            if (maxDistanceFromJointLine <= 0) return null;
 
             Curve[] curves;
             bool ok;
@@ -256,6 +270,15 @@ namespace SeaNest.Geometry
                 {
                     double t = domain.T0 + (domain.T1 - domain.T0) * i / SamplesPerCurve;
                     var pt = curve.PointAt(t);
+
+                    // Proximity gate: how far is this sample from the joint line?
+                    // Treat the joint line as infinite (limitToFiniteSegment: false)
+                    // since PlanePlane returns a segment whose length is arbitrary.
+                    var closest = jointLine.ClosestPoint(pt, limitToFiniteSegment: false);
+                    double distSq = (pt - closest).SquareLength;
+                    if (distSq > maxDistanceFromJointLine * maxDistanceFromJointLine)
+                        continue;
+
                     double score = pt.X * alongAxis.X + pt.Y * alongAxis.Y + pt.Z * alongAxis.Z;
                     if (findHigh)
                     {

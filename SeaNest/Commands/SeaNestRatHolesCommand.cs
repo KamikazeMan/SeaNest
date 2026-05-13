@@ -350,18 +350,24 @@ namespace SeaNest.Commands
 
             // Anchors: where the joint line crosses each outline.
             // Phase 20c.1: each anchor lookup falls back to BrepBrep
-            // intersection if the mid-plane outline misses (curved members
-            // whose mid-plane average doesn't reflect where the actual
-            // contact occurs).
+            // intersection if the mid-plane outline misses.
+            // Phase 20c.2: BrepBrep fallback is filtered by proximity to
+            // the joint line — discards spurious brush-contact points
+            // for curved members whose centerline doesn't actually cross
+            // the plate at this pair's position. Cutoff = 5× combined
+            // thickness, generous enough for curvature-displaced joints
+            // but tight enough to reject distant touches.
+            double maxJointDistance = (frameInfo.Thickness + stringerInfo.Thickness) * 5.0;
+
             Point3d frameBottomAnchor =
                 ResolveAnchorWithFallback(frameOutline, jointLine, upDir, findTop: false,
-                    frame, stringer, "frame", "bottom", tol);
+                    frame, stringer, "frame", "bottom", maxJointDistance, tol);
             Point3d stringerTopAnchor =
                 ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: true,
-                    stringer, frame, "stringer", "top", tol);
+                    stringer, frame, "stringer", "top", maxJointDistance, tol);
             Point3d stringerBottomAnchor =
                 ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: false,
-                    stringer, frame, "stringer", "bottom", tol);
+                    stringer, frame, "stringer", "bottom", maxJointDistance, tol);
 
             Point3d stringerMidPoint = new Point3d(
                 (stringerTopAnchor.X + stringerBottomAnchor.X) * 0.5,
@@ -485,23 +491,31 @@ namespace SeaNest.Commands
             Curve[] outline, Line jointLine, Vector3d upDir, bool findTop,
             Brep anchorPart, Brep otherPart,
             string partLabel, string positionLabel,
-            double tol)
+            double maxJointDistance, double tol)
         {
             var primary = JointGeometryHelpers.FindExtremeJointHit(
                 outline, jointLine, upDir, findTop, tol);
             if (primary.HasValue) return primary.Value;
 
             RhinoApp.WriteLine(string.Format(
-                "    joint line missed {0} outline ({1}) — attempting BrepBrep fallback.",
-                partLabel, positionLabel));
+                "    joint line missed {0} outline ({1}) — attempting BrepBrep fallback near joint line (within {2:G3}).",
+                partLabel, positionLabel, maxJointDistance));
 
-            var fallback = JointGeometryHelpers.FindExtremeIntersectionPoint(
-                anchorPart, otherPart, upDir, findHigh: findTop, tol);
-            if (fallback.HasValue) return fallback.Value;
+            var fallback = JointGeometryHelpers.FindExtremeIntersectionNearJointLine(
+                anchorPart, otherPart, upDir, findHigh: findTop,
+                jointLine, maxJointDistance, tol);
+            if (fallback.HasValue)
+            {
+                var pt = fallback.Value;
+                RhinoApp.WriteLine(string.Format(
+                    "    fallback anchor ({0} {1}): ({2:F2}, {3:F2}, {4:F2}).",
+                    partLabel, positionLabel, pt.X, pt.Y, pt.Z));
+                return pt;
+            }
 
             throw new Exception(string.Format(
-                "BrepBrep fallback also failed ({0} {1} anchor)",
-                partLabel, positionLabel));
+                "BrepBrep fallback found no intersection within {0:G3} of joint line ({1} {2} anchor)",
+                maxJointDistance, partLabel, positionLabel));
         }
     }
 }
