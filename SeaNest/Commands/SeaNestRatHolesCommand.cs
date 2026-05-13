@@ -907,19 +907,59 @@ namespace SeaNest.Commands
         /// Preconditions (enforced by the caller's silent-skip): cutters is
         /// non-null and Count &gt; 0.
         /// </summary>
+        /// <summary>
+        /// Apply a list of accumulated cutters to a single part. Tries one
+        /// multi-cutter <see cref="Brep.CreateBooleanDifference"/> first
+        /// (fast and clean when geometry is well-behaved); on failure falls
+        /// back to sequential single-cutter cuts so a single bad cutter
+        /// doesn't take the whole batch down. Returns the largest-volume
+        /// valid result, or null if every approach fails.
+        ///
+        /// Preconditions (enforced by the caller's silent-skip): cutters is
+        /// non-null and Count &gt; 0.
+        /// </summary>
         private static Brep ApplyCutters(Brep part, IReadOnlyList<Brep> cutters, double tol)
         {
             if (part == null || cutters == null || cutters.Count == 0) return null;
+
+            // Multi-cutter attempt — fastest path.
             try
             {
-                var result = Brep.CreateBooleanDifference(
+                var multi = Brep.CreateBooleanDifference(
                     new[] { part }, cutters.ToArray(), tol, false);
-                if (result == null || result.Length == 0) return null;
-                return result.Where(b => b != null && b.IsValid)
-                             .OrderByDescending(GetVolume)
-                             .FirstOrDefault();
+                if (multi != null && multi.Length > 0)
+                {
+                    var best = multi.Where(b => b != null && b.IsValid)
+                                    .OrderByDescending(GetVolume)
+                                    .FirstOrDefault();
+                    if (best != null) return best;
+                }
             }
-            catch { return null; }
+            catch { }
+
+            // Sequential fallback — apply cutters one at a time. Each
+            // successful cut chains into the next; failures are silently
+            // skipped so a single bad cutter doesn't void all the others.
+            Brep current = part.DuplicateBrep();
+            int seqOk = 0;
+            foreach (var cutter in cutters)
+            {
+                if (cutter == null) continue;
+                try
+                {
+                    var seq = Brep.CreateBooleanDifference(
+                        new[] { current }, new[] { cutter }, tol, false);
+                    if (seq == null || seq.Length == 0) continue;
+                    var seqBest = seq.Where(b => b != null && b.IsValid)
+                                     .OrderByDescending(GetVolume)
+                                     .FirstOrDefault();
+                    if (seqBest == null) continue;
+                    current = seqBest;
+                    seqOk++;
+                }
+                catch { }
+            }
+            return seqOk > 0 ? current : null;
         }
 
         private static double GetVolume(Brep brep)
