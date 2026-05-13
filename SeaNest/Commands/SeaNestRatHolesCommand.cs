@@ -54,9 +54,27 @@ namespace SeaNest.Commands
         private const double ParallelRejectSinThreshold = 0.05;
 
         // Cutter extrusion depth multiplier. Cutter passes through plate's
-        // thickness by this factor on each side (so 2× total). Comfortably
-        // overcuts so the boolean cleans up reliably.
-        private const double CutterOvercutFactor = 4.0;
+        // thickness by this factor on each side (so 2× total). Phase 20a.7.4:
+        // reduced from 4.0 to 2.0 — the original 4× margin had cutters
+        // overshooting the plate faces by 1.5× thickness each, which
+        // (combined with mid-plane face-coincidence) tripped Rhino's
+        // CreateBooleanDifference into returning the intersection slice
+        // instead of the part-with-hole. 2× still cleanly punches through
+        // (0.125" overhang per face on a 0.25" plate) without producing
+        // pathological boolean inputs.
+        private const double CutterOvercutFactor = 2.0;
+
+        // Phase 20a.7.4: offset the cutter centroid off the plate's
+        // mid-plane by this multiple of modelTol. Without it, the cutter is
+        // exactly centered on the plate's mid-plane — and parallel/coincident
+        // internal planes confuse the boolean algorithm, causing it to keep
+        // the intersection sliver instead of the part-minus-hole. The offset
+        // is along the plate's normal, so the cutter shifts perpendicular to
+        // the cut plane while still spanning the plate's full thickness.
+        // 2× modelTol is small enough to be visually unmeasurable on plate
+        // work (0.02" at typical doc tol) but large enough to break the
+        // coincident-face condition.
+        private const double CutterMidPlaneOffsetFactor = 2.0;
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
@@ -425,13 +443,21 @@ namespace SeaNest.Commands
             double cutterDepth = Math.Max(frameInfo.Thickness, stringerInfo.Thickness)
                                  * CutterOvercutFactor;
 
+            // Phase 20a.7.4: offset each cutter's center off the plate's
+            // mid-plane (perpendicular to the plate face, along the plate's
+            // normal). Breaks face-coincidence between cutter and plate
+            // mid-plane — see CutterMidPlaneOffsetFactor doc comment.
+            double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
+            Point3d frameAnchorForCut = frameBottomAnchor + nf * midPlaneOffset;
+            Point3d stringerAnchorForCut = stringerTopAnchor + ns * midPlaneOffset;
+
             Brep[] frameCutters = BuildFrameCompoundCutters(
-                frameBottomAnchor, nf, frameWidthDir, upDir,
+                frameAnchorForCut, nf, frameWidthDir, upDir,
                 frameSlotWidth, frameCutHeight, frameRatHoleRadius,
                 cutterDepth, tol);
 
             Brep[] stringerCutters = BuildStringerStadiumCutter(
-                stringerTopAnchor, ns, stringerWidthDir, upDir,
+                stringerAnchorForCut, ns, stringerWidthDir, upDir,
                 stringerSlotWidth, stringerSlotDepth,
                 cutterDepth, tol);
 
