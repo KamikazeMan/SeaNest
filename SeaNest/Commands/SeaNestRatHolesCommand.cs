@@ -48,6 +48,16 @@ namespace SeaNest.Commands
         // nominal) plus boolean failures from thin-vs-plate aspect ratios.
         private const double ClearanceTotal = 1.0 / 16.0;   // 1/16" total
 
+        // Phase 20a.7.7 — assembly-fit clearance between frame's upward
+        // dome and stringer's downward dome at the joint center. Without it,
+        // the two domes meet exactly at the midpoint plane and the parts
+        // bottom out before seating. Splitting half the clearance into each
+        // cut (frame's stadium overshoots midpoint by +half, stringer's by
+        // -half) leaves a total gap of AssemblyClearance between the two
+        // dome surfaces. 1/16" is the marine standard for hand-fit assembly
+        // tolerance.
+        private const double AssemblyClearance = 0.0625;   // 1/16"
+
         // Reject crossings less than this angle between plate and member faces
         // (i.e. when sin(angleBetween) < 0.05 ≈ 3°). Below this the slot
         // dimensions blow up and the joint is impractical to assemble.
@@ -107,10 +117,11 @@ namespace SeaNest.Commands
             // along with the kerf constants — consistent with Phase 17 export
             // and Phase 19b scribe lines, which also don't model kerf.
             double clearance = ClearanceTotal * inchScale;
+            double assemblyClearance = AssemblyClearance * inchScale;
 
             RhinoApp.WriteLine(string.Format(
-                "SeaNest Rat Holes: radius {0:G3} {1}, clearance {2:G3} {1}.",
-                radius, unitLabel, clearance));
+                "SeaNest Rat Holes: radius {0:G3} {1}, clearance {2:G3} {1}, assembly gap {3:G3} {1}.",
+                radius, unitLabel, clearance, assemblyClearance));
 
             // --- Select plates ---
             var goPlates = new GetObject();
@@ -214,7 +225,7 @@ namespace SeaNest.Commands
                     {
                         joint = BuildFrameStringerJointCutters(
                             plate, member,
-                            clearance, radius,
+                            clearance, assemblyClearance, radius,
                             modelTol);
                     }
                     catch (Exception ex)
@@ -355,7 +366,7 @@ namespace SeaNest.Commands
         /// </summary>
         private static JointCutResult BuildFrameStringerJointCutters(
             Brep frame, Brep stringer,
-            double clearance, double frameRatHoleRadius,
+            double clearance, double assemblyClearance, double frameRatHoleRadius,
             double tol)
         {
             Vector3d worldUp = Vector3d.ZAxis;
@@ -403,9 +414,15 @@ namespace SeaNest.Commands
                 (stringerTopAnchor.Y + stringerBottomAnchor.Y) * 0.5,
                 (stringerTopAnchor.Z + stringerBottomAnchor.Z) * 0.5);
 
-            // Cut heights along the joint centerline.
-            double frameCutHeight = DistanceAlong(frameBottomAnchor, stringerMidPoint, upDir);
-            double stringerSlotDepth = DistanceAlong(stringerMidPoint, stringerTopAnchor, upDir);
+            // Cut heights along the joint centerline. Phase 20a.7.7 — each
+            // cut overshoots the stringer midpoint by half the assembly
+            // clearance, leaving a total gap of `assemblyClearance` between
+            // the frame's upward dome and the stringer's downward dome so
+            // the parts don't bottom out at the joint center during
+            // hand-fit assembly.
+            double halfClearance = assemblyClearance * 0.5;
+            double frameCutHeight = DistanceAlong(frameBottomAnchor, stringerMidPoint, upDir) + halfClearance;
+            double stringerSlotDepth = DistanceAlong(stringerMidPoint, stringerTopAnchor, upDir) + halfClearance;
 
             if (frameCutHeight <= tol)
                 throw new Exception("frame cut height ≤ 0");
