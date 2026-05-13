@@ -11,34 +11,34 @@ using SeaNest.Geometry;
 namespace SeaNest.Commands
 {
     /// <summary>
-    /// SeaNestSlots — watertight tab-and-slot joinery. Plates remain solid;
-    /// members get a slot that the plate passes through. Used when the
-    /// joint must be watertight (welded around the slot perimeter on the
-    /// member side, with the plate sealing the slot via its uninterrupted
-    /// face).
+    /// SeaNestSlots — symmetric tab-and-slot joinery for plate × member
+    /// intersections. BOTH parts get matching stadium-slot cuts that
+    /// interlock during assembly; welded perimeters seal the joint
+    /// (suitable for watertight applications).
     ///
-    /// Phase 20b — Reuses Phase 20a.7's mid-plane-intersection joint
-    /// algorithm via <see cref="JointGeometryHelpers"/>. The geometry
-    /// pipeline is identical to SeaNestRatHoles up through anchor finding;
-    /// the only difference is that no frame cutter is built (plate stays
-    /// solid) and no rat-hole circle is added (no drainage path on a
-    /// watertight joint).
+    /// Phase 20b.1: same geometry algorithm as SeaNestRatHoles, minus
+    /// the full-circle rat-hole cylinder. For each plate × member pair:
+    ///   - Joint centerline := <c>Intersection.PlanePlane(midPlate, midMember)</c>
+    ///   - Plate stadium: opens at plate's bottom edge, extends upward
+    ///     to joint midpoint with dome cap past the chord
+    ///   - Member stadium: opens at member's top edge, extends downward
+    ///     to joint midpoint with dome cap past the chord
+    ///   - Both built via <see cref="JointGeometryHelpers.BuildStadiumSlotCutter"/>
     ///
     /// Distinction from SeaNestRatHoles:
-    ///   - SeaNestRatHoles: BOTH plate and member are cut. Plate gets a
-    ///     stadium slot + half-circle rat-hole at its edge; member gets a
-    ///     stadium slot. Used for drainage / non-watertight assembly.
-    ///   - SeaNestSlots (this command): ONLY the member is cut, with a
-    ///     stadium slot. Plate stays solid. Used for watertight assembly.
+    ///   - SeaNestRatHoles: dual cut + rat-hole drainage. The plate's
+    ///     cutter is a stadium PLUS a full-circle rat-hole cylinder at
+    ///     the bottom edge for weld access / water drainage.
+    ///   - SeaNestSlots (this command): dual cut, no rat-hole. Welded
+    ///     perimeter on both sides seals the joint.
     /// </summary>
     public class SeaNestSlotsCommand : Command
     {
         public override string EnglishName => "SeaNestSlots";
 
-        // Total clearance between plate and slot. Final slot width =
-        // plateThickness + ClearanceTotal. No kerf compensation — CAM
-        // handles that at toolpath time. Same value as SeaNestRatHoles
-        // for consistent marine fit standards.
+        // Total clearance between mating thickness and slot width. Final
+        // slot width = matingThickness + ClearanceTotal. No kerf
+        // compensation — CAM handles that at toolpath time.
         private const double ClearanceTotal = 1.0 / 16.0;   // 1/16" total
 
         // Reject crossings less than this angle between plate and member
@@ -47,14 +47,14 @@ namespace SeaNest.Commands
         private const double ParallelRejectSinThreshold = 0.05;
 
         // Cutter extrusion depth multiplier. Cutter passes through the
-        // member's thickness by this factor on each side (so 2× total).
+        // part's thickness by this factor on each side (so 2× total).
         private const double CutterOvercutFactor = 2.0;
 
-        // Offset the cutter centroid off the member's mid-plane by this
+        // Offset the cutter centroid off the part's mid-plane by this
         // multiple of modelTol. Breaks face-coincidence between cutter
-        // and member mid-plane that would otherwise confuse Rhino's
-        // boolean algorithm into returning the intersection sliver
-        // instead of the part-minus-hole.
+        // and mid-plane that would otherwise confuse Rhino's boolean
+        // algorithm into returning the intersection sliver instead of
+        // the part-minus-hole.
         private const double CutterMidPlaneOffsetFactor = 2.0;
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
@@ -75,12 +75,12 @@ namespace SeaNest.Commands
             double clearance = ClearanceTotal * inchScale;
 
             RhinoApp.WriteLine(string.Format(
-                "SeaNest Slots (watertight): clearance {0:G3} {1}. Plates remain solid; members get slots.",
+                "SeaNest Slots: clearance {0:G3} {1}. Both plates and members get interlocking stadium slots.",
                 clearance, unitLabel));
 
-            // --- Select plates (these stay solid; their thickness sizes the slot) ---
+            // --- Select plates ---
             var goPlates = new GetObject();
-            goPlates.SetCommandPrompt("Select plates (stay solid; pass through member slots)");
+            goPlates.SetCommandPrompt("Select plates");
             goPlates.GeometryFilter = ObjectType.Brep | ObjectType.Extrusion;
             goPlates.GroupSelect = true;
             goPlates.SubObjectSelect = false;
@@ -89,6 +89,7 @@ namespace SeaNest.Commands
             if (goPlates.CommandResult() != Result.Success) return goPlates.CommandResult();
 
             var plates = new List<Brep>();
+            var plateIds = new List<Guid>();
             var plateIdSet = new HashSet<Guid>();
             for (int i = 0; i < goPlates.ObjectCount; i++)
             {
@@ -102,13 +103,14 @@ namespace SeaNest.Commands
                 if (b != null && b.IsValid)
                 {
                     plates.Add(b.DuplicateBrep());
+                    plateIds.Add(obj.ObjectId);
                     plateIdSet.Add(obj.ObjectId);
                 }
             }
 
-            // --- Select structural members (these get cut) ---
+            // --- Select structural members ---
             var goMembers = new GetObject();
-            goMembers.SetCommandPrompt("Select structural members (get slots)");
+            goMembers.SetCommandPrompt("Select structural members");
             goMembers.GeometryFilter = ObjectType.Brep | ObjectType.Extrusion;
             goMembers.GroupSelect = true;
             goMembers.SubObjectSelect = false;
@@ -152,8 +154,10 @@ namespace SeaNest.Commands
                 return Result.Failure;
             }
 
-            // --- Per-pair joint compute: accumulate member cutters only ---
+            // --- Per-pair joint compute: accumulate cutters per part ---
+            var plateCutters = new List<List<Brep>>();
             var memberCutters = new List<List<Brep>>();
+            for (int i = 0; i < plates.Count; i++) plateCutters.Add(new List<Brep>());
             for (int i = 0; i < members.Count; i++) memberCutters.Add(new List<Brep>());
 
             int pairsSkipped = 0;
@@ -170,10 +174,12 @@ namespace SeaNest.Commands
                     var overlap = BoundingBox.Intersection(plateBBox, memberBBox);
                     if (!overlap.IsValid) continue;
 
-                    Brep[] cutters;
+                    Brep[] plateSlotCutter, memberSlotCutter;
                     try
                     {
-                        cutters = BuildMemberSlotCutter(plate, member, clearance, modelTol);
+                        BuildSymmetricSlotCutters(
+                            plate, member, clearance, modelTol,
+                            out plateSlotCutter, out memberSlotCutter);
                     }
                     catch (Exception ex)
                     {
@@ -184,14 +190,42 @@ namespace SeaNest.Commands
                         continue;
                     }
 
-                    if (cutters != null) memberCutters[m].AddRange(cutters);
+                    if (plateSlotCutter != null)  plateCutters[p].AddRange(plateSlotCutter);
+                    if (memberSlotCutter != null) memberCutters[m].AddRange(memberSlotCutter);
                 }
             }
 
-            // --- Apply accumulated cuts to members only (plates untouched) ---
+            // --- Apply accumulated cuts to both plates AND members ---
+            int platesCut = 0;
+            int totalPlateCuts = 0;
             int membersCut = 0;
             int totalMemberCuts = 0;
             int booleanFailures = 0;
+
+            for (int p = 0; p < plates.Count; p++)
+            {
+                if (plateCutters[p].Count == 0) continue;
+                var result = JointGeometryHelpers.ApplyCutters(plates[p], plateCutters[p], modelTol);
+                if (result == null)
+                {
+                    RhinoApp.WriteLine(string.Format(
+                        "  Plate {0}: boolean difference failed ({1} cutter(s)) — left unchanged.",
+                        p + 1, plateCutters[p].Count));
+                    booleanFailures++;
+                    continue;
+                }
+                if (doc.Objects.Replace(plateIds[p], result))
+                {
+                    platesCut++;
+                    totalPlateCuts += plateCutters[p].Count;
+                }
+                else
+                {
+                    RhinoApp.WriteLine(string.Format(
+                        "  Plate {0}: doc.Objects.Replace failed.", p + 1));
+                    booleanFailures++;
+                }
+            }
 
             for (int m = 0; m < members.Count; m++)
             {
@@ -220,15 +254,16 @@ namespace SeaNest.Commands
 
             RhinoApp.WriteLine("==========================================");
             RhinoApp.WriteLine(string.Format(
-                "  SeaNest Slots: {0} member(s) cut with {1} slot(s). Plates unchanged.",
-                membersCut, totalMemberCuts));
+                "  SeaNest Slots: {0} plate(s) cut with {1} slot(s); " +
+                "{2} member(s) cut with {3} slot(s).",
+                platesCut, totalPlateCuts, membersCut, totalMemberCuts));
             if (pairsSkipped > 0)
                 RhinoApp.WriteLine(string.Format(
                     "  Skipped {0} pair(s) due to joint-geometry issues (see messages above).",
                     pairsSkipped));
             if (booleanFailures > 0)
                 RhinoApp.WriteLine(string.Format(
-                    "  {0} boolean failure(s) — affected members left unchanged.", booleanFailures));
+                    "  {0} boolean failure(s) — affected parts left unchanged.", booleanFailures));
             RhinoApp.WriteLine("==========================================");
 
             doc.Views.Redraw();
@@ -236,14 +271,20 @@ namespace SeaNest.Commands
         }
 
         /// <summary>
-        /// Per-pair joint-compute for the watertight-slot case. Builds ONLY
-        /// the member's stadium slot cutter — no plate cutter, no rat-hole
-        /// circle. Shared joint-geometry math (mid-plane detection, joint
-        /// centerline, anchor finding) delegated to <see cref="JointGeometryHelpers"/>.
+        /// Per-pair joint-compute. Builds the symmetric pair of stadium
+        /// slot cutters — one for the plate (opens at its bottom edge,
+        /// extends up to joint midpoint) and one for the member (opens
+        /// at its top edge, extends down to joint midpoint). Shared
+        /// joint-geometry math (mid-plane detection, joint centerline,
+        /// anchor finding) delegated to <see cref="JointGeometryHelpers"/>.
+        ///
+        /// Mirrors <c>SeaNestRatHolesCommand.BuildFrameStringerJointCutters</c>
+        /// minus the rat-hole cylinder.
         /// </summary>
-        private static Brep[] BuildMemberSlotCutter(
+        private static void BuildSymmetricSlotCutters(
             Brep plate, Brep member,
-            double clearance, double tol)
+            double clearance, double tol,
+            out Brep[] plateCutters, out Brep[] memberCutters)
         {
             Vector3d worldUp = Vector3d.ZAxis;
 
@@ -253,7 +294,6 @@ namespace SeaNest.Commands
             Vector3d np = plateInfo.Normal; np.Unitize();
             Vector3d nm = memberInfo.Normal; nm.Unitize();
 
-            // Joint centerline: intersection of the two mid-planes.
             double sinAngle = Vector3d.CrossProduct(np, nm).Length;
             if (sinAngle < ParallelRejectSinThreshold)
                 throw new Exception("plate and member are nearly parallel");
@@ -267,60 +307,70 @@ namespace SeaNest.Commands
                 throw new Exception("joint centerline has zero length");
             if (upDir * worldUp < 0.0) upDir.Reverse();
 
-            // Member's mid-plane outline.
+            // Section both plates at their own mid-planes.
+            Curve[] plateOutline = JointGeometryHelpers.SectionPlateAtMidPlane(plate, plateInfo.MidPlane, tol);
             Curve[] memberOutline = JointGeometryHelpers.SectionPlateAtMidPlane(member, memberInfo.MidPlane, tol);
+            if (plateOutline.Length == 0)
+                throw new Exception("plate mid-plane section returned no curves");
             if (memberOutline.Length == 0)
                 throw new Exception("member mid-plane section returned no curves");
 
-            // Anchors: top + bottom of where the joint line crosses the
-            // member's mid-plane outline. The stadium opens at the top
-            // anchor and extends down to the joint midpoint (between the
-            // top and bottom anchors).
+            // Anchors: where the joint line crosses each outline.
+            Point3d plateBottomAnchor =
+                JointGeometryHelpers.FindExtremeJointHit(plateOutline, jointLine, upDir, findTop: false, tol);
             Point3d memberTopAnchor =
                 JointGeometryHelpers.FindExtremeJointHit(memberOutline, jointLine, upDir, findTop: true, tol);
             Point3d memberBottomAnchor =
                 JointGeometryHelpers.FindExtremeJointHit(memberOutline, jointLine, upDir, findTop: false, tol);
 
-            Point3d memberMidPoint = new Point3d(
+            Point3d jointMidPoint = new Point3d(
                 (memberTopAnchor.X + memberBottomAnchor.X) * 0.5,
                 (memberTopAnchor.Y + memberBottomAnchor.Y) * 0.5,
                 (memberTopAnchor.Z + memberBottomAnchor.Z) * 0.5);
 
-            // Slot depth: top anchor down to the member's mid-point along
-            // the joint centerline. For a watertight joint, the slot
-            // extends to the half-depth of the member — the plate
-            // engages this far into the member's body, with the rest of
-            // the member solid to provide the welded seal area.
-            double slotDepth = JointGeometryHelpers.DistanceAlong(memberMidPoint, memberTopAnchor, upDir);
-            if (slotDepth <= tol)
-                throw new Exception("member slot depth ≤ 0");
+            // Chord positions — both slots' rectangular portions end at
+            // the joint midpoint, with their dome caps extending past
+            // the chord into each opposing part's body.
+            double plateCutHeight = JointGeometryHelpers.DistanceAlong(plateBottomAnchor, jointMidPoint, upDir);
+            double memberSlotDepth = JointGeometryHelpers.DistanceAlong(jointMidPoint, memberTopAnchor, upDir);
 
-            // Slot width: plate thickness + clearance, scaled by 1/sinAngle
-            // for oblique crossings (the perpendicular plate thickness
-            // projects wider along the slot's width axis).
-            double slotWidth = (plateInfo.Thickness + clearance) / sinAngle;
-            if (slotWidth <= tol)
-                throw new Exception("member slot width ≤ 0");
+            if (plateCutHeight <= tol) throw new Exception("plate cut height ≤ 0");
+            if (memberSlotDepth <= tol) throw new Exception("member slot depth ≤ 0");
 
-            // In-plane width axis (perpendicular to upDir, in the member's
-            // mid-plane).
+            // Slot widths: mating thickness + clearance, scaled by
+            // 1/sinAngle for oblique crossings.
+            double plateSlotWidth = (memberInfo.Thickness + clearance) / sinAngle;
+            double memberSlotWidth = (plateInfo.Thickness + clearance) / sinAngle;
+
+            if (plateSlotWidth <= tol) throw new Exception("plate slot width ≤ 0");
+            if (memberSlotWidth <= tol) throw new Exception("member slot width ≤ 0");
+
+            // In-plane width axes (perpendicular to upDir, in each plate's plane).
+            Vector3d plateWidthDir = Vector3d.CrossProduct(upDir, np);
+            if (!plateWidthDir.Unitize()) throw new Exception("plate width axis degenerate");
             Vector3d memberWidthDir = Vector3d.CrossProduct(upDir, nm);
             if (!memberWidthDir.Unitize()) throw new Exception("member width axis degenerate");
 
-            double cutterDepth = memberInfo.Thickness * CutterOvercutFactor;
+            double cutterDepth = Math.Max(plateInfo.Thickness, memberInfo.Thickness)
+                                 * CutterOvercutFactor;
 
-            // Offset the cutter centroid off the member's mid-plane to
-            // break face-coincidence with the boolean algorithm.
+            // Offset each cutter's center off its part's mid-plane.
             double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
-            Point3d anchorForCut = memberTopAnchor + nm * midPlaneOffset;
+            Point3d plateAnchorForCut = plateBottomAnchor + np * midPlaneOffset;
+            Point3d memberAnchorForCut = memberTopAnchor + nm * midPlaneOffset;
 
-            // Shared stadium slot cutter (same geometry the rat-holes
-            // command uses for its member side — chord at Y=-slotDepth,
-            // dome past the chord, top edge overcutting past the member's
-            // top edge by cutterDepth).
-            return JointGeometryHelpers.BuildStadiumSlotCutter(
-                anchorForCut, nm, memberWidthDir, upDir,
-                slotWidth, slotDepth,
+            // Both slots use the shared stadium primitive. The slot
+            // extension direction differs per part:
+            //   - Plate: anchor on bottom edge, slot extends +upDir
+            //   - Member: anchor on top edge, slot extends -upDir
+            plateCutters = JointGeometryHelpers.BuildStadiumSlotCutter(
+                plateAnchorForCut, np, plateWidthDir, upDir,
+                plateSlotWidth, plateCutHeight,
+                cutterDepth, tol);
+
+            memberCutters = JointGeometryHelpers.BuildStadiumSlotCutter(
+                memberAnchorForCut, nm, memberWidthDir, -upDir,
+                memberSlotWidth, memberSlotDepth,
                 cutterDepth, tol);
         }
     }
