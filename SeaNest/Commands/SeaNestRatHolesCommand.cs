@@ -705,9 +705,10 @@ namespace SeaNest.Commands
                 {
                     var bb = slotCutter.GetBoundingBox(true);
                     Rhino.RhinoApp.WriteLine(string.Format(
-                        "[ratHole-diag]   slot cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}).",
+                        "[ratHole-diag]   slot cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}), orientation={6}.",
                         bb.Diagonal.X, bb.Diagonal.Y, bb.Diagonal.Z,
-                        bb.Center.X, bb.Center.Y, bb.Center.Z));
+                        bb.Center.X, bb.Center.Y, bb.Center.Z,
+                        slotCutter.SolidOrientation));
                     cutters.Add(slotCutter);
                 }
                 else
@@ -733,11 +734,16 @@ namespace SeaNest.Commands
                 if (cylBrep != null && cylBrep.IsValid)
                 {
                     cylBrep.Translate(frameNormal * (-cutterDepth / 2.0));
+                    // Phase 20a.7.5: ensure outward orientation, same as
+                    // ExtrudeClosedPlanarCurve. Cylinder.ToBrep can produce
+                    // inward-facing normals depending on internal conventions.
+                    EnsureOutwardOrientation(cylBrep);
                     var bb = cylBrep.GetBoundingBox(true);
                     Rhino.RhinoApp.WriteLine(string.Format(
-                        "[ratHole-diag]   full-circle cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}).",
+                        "[ratHole-diag]   full-circle cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}), orientation={6}.",
                         bb.Diagonal.X, bb.Diagonal.Y, bb.Diagonal.Z,
-                        bb.Center.X, bb.Center.Y, bb.Center.Z));
+                        bb.Center.X, bb.Center.Y, bb.Center.Z,
+                        cylBrep.SolidOrientation));
                     cutters.Add(cylBrep);
                 }
                 else
@@ -831,9 +837,10 @@ namespace SeaNest.Commands
             {
                 var bb = cutter.GetBoundingBox(true);
                 Rhino.RhinoApp.WriteLine(string.Format(
-                    "[ratHole-diag]   stringer stadium cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}).",
+                    "[ratHole-diag]   stringer stadium cutter bbox=[{0:F3}×{1:F3}×{2:F3}], centroid=({3:F2},{4:F2},{5:F2}), orientation={6}.",
                     bb.Diagonal.X, bb.Diagonal.Y, bb.Diagonal.Z,
-                    bb.Center.X, bb.Center.Y, bb.Center.Z));
+                    bb.Center.X, bb.Center.Y, bb.Center.Z,
+                    cutter.SolidOrientation));
                 return new[] { cutter };
             }
             Rhino.RhinoApp.WriteLine("[ratHole-diag]   stringer stadium EXTRUSION FAILED.");
@@ -897,7 +904,38 @@ namespace SeaNest.Commands
             brep = brep.CapPlanarHoles(0.001);
             if (brep == null || !brep.IsValid) return null;
             brep.Translate(dir * (-depth / 2.0));
+            // Phase 20a.7.5: ensure outward-facing normals so the cutter
+            // reads as solid (not void) to Rhino's boolean algorithm. See
+            // EnsureOutwardOrientation for why.
+            EnsureOutwardOrientation(brep);
             return brep;
+        }
+
+        /// <summary>
+        /// Phase 20a.7.5 — verify the cutter Brep is a closed solid with
+        /// outward-pointing face normals, and Flip if inward-pointing.
+        ///
+        /// Rhino's CreateBooleanDifference treats a cutter with INWARD
+        /// normals as describing the void OUTSIDE the cutter's volume —
+        /// equivalent to subtracting "everything not the cutter" from the
+        /// part. Result: only the cutter-intersect-part sliver survives,
+        /// matching the "Δ=204" symptom (cutter ≈ 0.93 in³ but cut removed
+        /// the entire 204 in³ plate, leaving the 0.234 in³ overlap).
+        ///
+        /// Surface.CreateExtrusion + CapPlanarHoles can produce inward
+        /// orientation depending on the profile curve's winding direction
+        /// vs. the extrusion direction. Cylinder.ToBrep can do the same.
+        /// SolidOrientation == Outward is the safe state for cutters.
+        /// </summary>
+        private static void EnsureOutwardOrientation(Brep brep)
+        {
+            if (brep == null) return;
+            try
+            {
+                if (brep.SolidOrientation == BrepSolidOrientation.Inward)
+                    brep.Flip();
+            }
+            catch { }
         }
 
         // ---------------------------------------------------------------
@@ -941,8 +979,8 @@ namespace SeaNest.Commands
                 try { centroidInside = part.IsPointInside(bb.Center, tol, false); }
                 catch { }
                 Rhino.RhinoApp.WriteLine(string.Format(
-                    "[ratHole-diag] {0} cutter {1}: IsValid={2}, IsSolid={3}, bbox=[{4:F3}×{5:F3}×{6:F3}], centroid=({7:F2},{8:F2},{9:F2}), centroidInsidePart={10}.",
-                    label, i + 1, c.IsValid, c.IsSolid,
+                    "[ratHole-diag] {0} cutter {1}: IsValid={2}, IsSolid={3}, orientation={4}, bbox=[{5:F3}×{6:F3}×{7:F3}], centroid=({8:F2},{9:F2},{10:F2}), centroidInsidePart={11}.",
+                    label, i + 1, c.IsValid, c.IsSolid, c.SolidOrientation,
                     bb.Diagonal.X, bb.Diagonal.Y, bb.Diagonal.Z,
                     bb.Center.X, bb.Center.Y, bb.Center.Z, centroidInside));
             }
