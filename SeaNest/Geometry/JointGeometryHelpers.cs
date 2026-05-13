@@ -257,6 +257,14 @@ namespace SeaNest.Geometry
             }
             if (!ok || curves == null || curves.Length == 0) return null;
 
+            // Phase 20c.3: length-filter pre-pass — skip BrepBrep result
+            // curves shorter than 10× modelTol. These are tangent-contact
+            // noise (parts brushing against each other rather than crossing)
+            // and routinely produce spurious anchor positions. Real joint
+            // intersection curves are at least the part's full contact
+            // extent, well above this threshold.
+            double minCurveLength = tol * 10.0;
+
             const int SamplesPerCurve = 100;
             bool any = false;
             double bestScore = findHigh ? double.NegativeInfinity : double.PositiveInfinity;
@@ -265,6 +273,7 @@ namespace SeaNest.Geometry
             foreach (var curve in curves)
             {
                 if (curve == null) continue;
+                if (curve.GetLength() < minCurveLength) continue;
                 var domain = curve.Domain;
                 for (int i = 0; i <= SamplesPerCurve; i++)
                 {

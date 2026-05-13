@@ -305,7 +305,21 @@ namespace SeaNest.Commands
             Vector3d upDir = jointLine.Direction;
             if (!upDir.Unitize())
                 throw new Exception("joint centerline has zero length");
-            if (upDir * worldUp < 0.0) upDir.Reverse();
+            // Phase 20c.3: body-relative sign-correction toward the
+            // member's centroid (intrinsic to the joint geometry, robust
+            // for curved/tilted members). World-Z fallback when joint
+            // midpoint coincides with member centroid (degenerate case).
+            var jointMid = jointLine.PointAt(0.5);
+            var memberCenter = member.GetBoundingBox(true).Center;
+            var towardMember = memberCenter - jointMid;
+            if (towardMember.Length < tol)
+            {
+                if (upDir * worldUp < 0.0) upDir.Reverse();
+            }
+            else
+            {
+                if (upDir * towardMember < 0.0) upDir.Reverse();
+            }
 
             // Section both plates at their own mid-planes.
             Curve[] plateOutline = JointGeometryHelpers.SectionPlateAtMidPlane(plate, plateInfo.MidPlane, tol);
@@ -330,10 +344,10 @@ namespace SeaNest.Commands
             // each other.)
             // Phase 20c.1: anchor lookups fall back to BrepBrep when the
             // mid-plane outline misses. Phase 20c.2: fallback is filtered
-            // by proximity to the joint line (5× combined thickness) so
-            // curved-member brush-contacts at distant positions don't
-            // produce spurious cuts.
-            double maxJointDistance = (plateInfo.Thickness + memberInfo.Thickness) * 5.0;
+            // by proximity to the joint line so curved-member
+            // brush-contacts at distant positions don't produce spurious
+            // cuts. Phase 20c.3: cutoff is 10× MAX thickness (was 5× sum).
+            double maxJointDistance = Math.Max(plateInfo.Thickness, memberInfo.Thickness) * 10.0;
 
             Point3d plateTopAnchor =
                 ResolveAnchorWithFallback(plateOutline, jointLine, upDir, findTop: true,

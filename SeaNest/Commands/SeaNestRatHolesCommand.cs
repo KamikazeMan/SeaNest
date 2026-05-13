@@ -338,7 +338,32 @@ namespace SeaNest.Commands
             Vector3d upDir = jointLine.Direction;
             if (!upDir.Unitize())
                 throw new Exception("joint centerline has zero length");
-            if (upDir * worldUp < 0.0) upDir.Reverse();
+            // Phase 20c.3: body-relative sign-correction. The previous
+            // world-Z bias worked for vertical-member geometry but flipped
+            // for curved/tilted joints whose direction wasn't roughly
+            // Z-aligned. Toward-member-centroid is intrinsic to the
+            // geometry: upDir always points from the joint INTO the
+            // member's body, so "stringerTopAnchor" (high along upDir)
+            // consistently means "the top extreme of where the joint
+            // passes through the stringer."
+            //
+            // Degenerate-fallback: when jointMidpoint ≈ memberCentroid
+            // (joint passes exactly through the member's bbox center,
+            // rare but possible), the towardMember vector becomes zero
+            // and sign-correction is undefined. Fall back to world +Z
+            // for that case — matches prior behavior when geometry is
+            // typically vertical.
+            var jointMid = jointLine.PointAt(0.5);
+            var memberCenter = stringer.GetBoundingBox(true).Center;
+            var towardMember = memberCenter - jointMid;
+            if (towardMember.Length < tol)
+            {
+                if (upDir * worldUp < 0.0) upDir.Reverse();
+            }
+            else
+            {
+                if (upDir * towardMember < 0.0) upDir.Reverse();
+            }
 
             // Section both plates at their own mid-planes.
             Curve[] frameOutline = JointGeometryHelpers.SectionPlateAtMidPlane(frame, frameInfo.MidPlane, tol);
@@ -353,11 +378,13 @@ namespace SeaNest.Commands
             // intersection if the mid-plane outline misses.
             // Phase 20c.2: BrepBrep fallback is filtered by proximity to
             // the joint line — discards spurious brush-contact points
-            // for curved members whose centerline doesn't actually cross
-            // the plate at this pair's position. Cutoff = 5× combined
-            // thickness, generous enough for curvature-displaced joints
-            // but tight enough to reject distant touches.
-            double maxJointDistance = (frameInfo.Thickness + stringerInfo.Thickness) * 5.0;
+            // for curved members.
+            // Phase 20c.3: cutoff = 10× MAX thickness (was 5× sum). The
+            // max-based formula tracks the larger part's geometry more
+            // faithfully when thicknesses differ — a thick plate's
+            // legitimate curvature-displaced joint can spread further
+            // than the sum-based formula would tolerate.
+            double maxJointDistance = Math.Max(frameInfo.Thickness, stringerInfo.Thickness) * 10.0;
 
             Point3d frameBottomAnchor =
                 ResolveAnchorWithFallback(frameOutline, jointLine, upDir, findTop: false,
