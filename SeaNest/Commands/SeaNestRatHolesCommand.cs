@@ -391,6 +391,53 @@ namespace SeaNest.Commands
                             drawnSlotWidth, drawnSlotLength, memberThickness * 4.0);
                         if (memberCutter == null) continue;
 
+                        // Phase 20a.4 — TEMPORARY orientation-vector diagnostic.
+                        // Logs the axes feeding into the cutter helpers plus
+                        // sanity-check dot products: plateInto = (plateCentroid
+                        // - anchorPt) · plateNormal. Positive means plateNormal
+                        // already points INTO the plate body (good for the
+                        // current translation logic); negative means it points
+                        // OUTWARD and the cutter will end up on the wrong side.
+                        // Same for memberInto with alongMember and the member
+                        // centroid. Strip in Phase 20a.5 once the orientation
+                        // bug is identified.
+                        var plateCentroid = plateBBox.Center;
+                        var memberCentroid = memberBBox.Center;
+                        double plateIntoDot = (plateCentroid - anchorPt) * plateNormal;
+                        double memberIntoDot = (memberCentroid - anchorPt) * alongMember;
+                        RhinoApp.WriteLine(string.Format(
+                            "[ratHole-diag] Plate {0} × Member {1} anchor=({2:F2},{3:F2},{4:F2}), " +
+                            "plateThickness={5:F3}, memberThickness={6:F3}.",
+                            p + 1, m + 1, anchorPt.X, anchorPt.Y, anchorPt.Z,
+                            plateThickness, memberThickness));
+                        RhinoApp.WriteLine(string.Format(
+                            "[ratHole-diag]   plateNormal=({0:F3},{1:F3},{2:F3}), " +
+                            "alongPlateEdge=({3:F3},{4:F3},{5:F3}), " +
+                            "plateCentroid=({6:F2},{7:F2},{8:F2}), plateInto·n={9:F3} " +
+                            "({10}).",
+                            plateNormal.X, plateNormal.Y, plateNormal.Z,
+                            alongPlateEdge.X, alongPlateEdge.Y, alongPlateEdge.Z,
+                            plateCentroid.X, plateCentroid.Y, plateCentroid.Z,
+                            plateIntoDot,
+                            plateIntoDot > 0 ? "plateNormal points INTO body" : "plateNormal points OUTWARD"));
+                        RhinoApp.WriteLine(string.Format(
+                            "[ratHole-diag]   alongMember=({0:F3},{1:F3},{2:F3}), " +
+                            "acrossMember=({3:F3},{4:F3},{5:F3}), " +
+                            "memberNormal=({6:F3},{7:F3},{8:F3}), " +
+                            "memberCentroid=({9:F2},{10:F2},{11:F2}), memberInto·a={12:F3} " +
+                            "({13}).",
+                            alongMember.X, alongMember.Y, alongMember.Z,
+                            acrossMember.X, acrossMember.Y, acrossMember.Z,
+                            memberNormal.X, memberNormal.Y, memberNormal.Z,
+                            memberCentroid.X, memberCentroid.Y, memberCentroid.Z,
+                            memberIntoDot,
+                            memberIntoDot > 0 ? "alongMember points INTO body" : "alongMember points OUTWARD"));
+                        RhinoApp.WriteLine(string.Format(
+                            "[ratHole-diag]   drawnRadius={0:F3}, drawnSlotW={1:F3}, drawnSlotL={2:F3}, " +
+                            "cutterDepthPlate={3:F3}, cutterDepthMember={4:F3}.",
+                            drawnRadius, drawnSlotWidth, drawnSlotLength,
+                            plateThickness * 4.0, memberThickness * 4.0));
+
                         plateCutters[p].Add(plateCutter);
                         memberCutters[m].Add(memberCutter);
                     }
