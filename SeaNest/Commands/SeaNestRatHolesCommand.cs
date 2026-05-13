@@ -338,32 +338,28 @@ namespace SeaNest.Commands
             Vector3d upDir = jointLine.Direction;
             if (!upDir.Unitize())
                 throw new Exception("joint centerline has zero length");
-            // Phase 20c.3: body-relative sign-correction. The previous
-            // world-Z bias worked for vertical-member geometry but flipped
-            // for curved/tilted joints whose direction wasn't roughly
-            // Z-aligned. Toward-member-centroid is intrinsic to the
-            // geometry: upDir always points from the joint INTO the
-            // member's body, so "stringerTopAnchor" (high along upDir)
-            // consistently means "the top extreme of where the joint
-            // passes through the stringer."
+            // Phase 20c.4 — reverted to world-Z sign-correction. Phase
+            // 20c.3's body-relative attempt (towardMember = memberCenter -
+            // jointMid) produced uniformly flipped cuts because:
+            //   (a) jointLine.PointAt(0.5) is at an arbitrary parametric
+            //       position on the line (Intersection.PlanePlane's From/To
+            //       are not geometrically anchored), so jointMid can land
+            //       far from the actual joint contact;
+            //   (b) Even with a corrected jointMid via ClosestParameter,
+            //       the resulting towardMember is perpendicular to the
+            //       joint-line direction (closest-point projection
+            //       minimizes distance → vector is perpendicular to line),
+            //       so upDir * towardMember = 0 and sign-correction is
+            //       undefined / driven by float noise.
             //
-            // Degenerate-fallback: when jointMidpoint ≈ memberCentroid
-            // (joint passes exactly through the member's bbox center,
-            // rare but possible), the towardMember vector becomes zero
-            // and sign-correction is undefined. Fall back to world +Z
-            // for that case — matches prior behavior when geometry is
-            // typically vertical.
-            var jointMid = jointLine.PointAt(0.5);
-            var memberCenter = stringer.GetBoundingBox(true).Center;
-            var towardMember = memberCenter - jointMid;
-            if (towardMember.Length < tol)
-            {
-                if (upDir * worldUp < 0.0) upDir.Reverse();
-            }
-            else
-            {
-                if (upDir * towardMember < 0.0) upDir.Reverse();
-            }
+            // World-Z works for the typical vertical-member geometry that
+            // SeaNest targets. The "curved members mirrored" symptom that
+            // motivated 20c.3 was actually Phase 20c.1's unfiltered BrepBrep
+            // fallback returning spurious anchors — fixed by 20c.2's
+            // proximity filter, which remains in place. Horizontal-member
+            // geometry (joint line perpendicular to Z) is a separate
+            // unresolved case for any future phase.
+            if (upDir * worldUp < 0.0) upDir.Reverse();
 
             // Section both plates at their own mid-planes.
             Curve[] frameOutline = JointGeometryHelpers.SectionPlateAtMidPlane(frame, frameInfo.MidPlane, tol);
