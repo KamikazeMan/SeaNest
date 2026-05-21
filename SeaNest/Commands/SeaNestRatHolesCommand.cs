@@ -450,9 +450,20 @@ namespace SeaNest.Commands
             // case where the BrepBrep extents already gave thickness.
             double maxJointDistance = Math.Max(frameInfo.Thickness, stringerInfo.Thickness) * 10.0;
 
-            Point3d stringerBottomAnchor =
+            var (stringerBottomAnchor, usedFallback) =
                 ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: false,
                     stringer, frame, "stringer", "bottom", maxJointDistance, tol);
+
+            // Phase 20c.9: BrepBrep fallback returns the contact-band
+            // center, not the stringer's actual bottom face. When the
+            // fallback path was used, shift the anchor DOWN by half the
+            // stringer's thickness so it lands at the true outer bottom
+            // face. The outline-hit primary path already returns the
+            // correct bottom point and needs no shift.
+            if (usedFallback)
+            {
+                stringerBottomAnchor -= upDir * (stringerInfo.Thickness * 0.5);
+            }
 
             // Phase 20c.8: derive stringerTopAnchor and stringerMidPoint
             // from the stringer's own thickness along upDir, not from
@@ -587,8 +598,17 @@ namespace SeaNest.Commands
         /// The fallback uses BrepBrep on those two parts (symmetric, but
         /// the labels in the diagnostic refer to <paramref name="partLabel"/>
         /// and <paramref name="positionLabel"/>).
+        ///
+        /// Phase 20c.9: returns a `usedFallback` flag. The mid-plane
+        /// outline path returns the anchor at the stringer's actual outer
+        /// face (because the outline runs along the face's edge). The
+        /// BrepBrep fallback returns the contact-band center, which for
+        /// curved geometry sits at the stringer's mid-thickness Z. The
+        /// flag lets the caller compensate by shifting the anchor
+        /// down by half-thickness when the fallback was used, keeping
+        /// the anchor at the actual bottom face for both code paths.
         /// </summary>
-        private static Point3d ResolveAnchorWithFallback(
+        private static (Point3d anchor, bool usedFallback) ResolveAnchorWithFallback(
             Curve[] outline, Line jointLine, Vector3d upDir, bool findTop,
             Brep anchorPart, Brep otherPart,
             string partLabel, string positionLabel,
@@ -596,7 +616,7 @@ namespace SeaNest.Commands
         {
             var primary = JointGeometryHelpers.FindExtremeJointHit(
                 outline, jointLine, upDir, findTop, tol);
-            if (primary.HasValue) return primary.Value;
+            if (primary.HasValue) return (primary.Value, false);
 
             RhinoApp.WriteLine(string.Format(
                 "    joint line missed {0} outline ({1}) — attempting BrepBrep fallback near joint line (within {2:G3}).",
@@ -611,7 +631,7 @@ namespace SeaNest.Commands
                 RhinoApp.WriteLine(string.Format(
                     "    fallback anchor ({0} {1}): ({2:F2}, {3:F2}, {4:F2}).",
                     partLabel, positionLabel, pt.X, pt.Y, pt.Z));
-                return pt;
+                return (pt, true);
             }
 
             throw new Exception(string.Format(
