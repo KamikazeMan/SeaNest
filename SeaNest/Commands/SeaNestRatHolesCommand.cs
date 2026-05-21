@@ -501,7 +501,23 @@ namespace SeaNest.Commands
             // other). Plane.ClosestPoint subtracts the component along the
             // mid-plane's normal, which is perpendicular to upDir (because
             // upDir ∝ nf × ns), so slot elevation along upDir is unchanged.
-            Point3d framePivot = stringerInfo.MidPlane.ClosestPoint(stringerBottomAnchor);
+            //
+            // Phase 20c.14: for CURVED stringers, stringerInfo.MidPlane is
+            // an AVERAGED mid-plane across the whole member — wrong at any
+            // specific frame's location. Build a LOCAL mid-thickness plane
+            // through section.MidAnchor (the local section's center) but
+            // KEEP the averaged stringer normal as the plane normal. The
+            // averaged normal is still ⊥ upDir (by construction), so
+            // projection preserves upDir component (slot elevation
+            // unchanged). The plane origin shifts to the local section
+            // center, so the projection lands at the stringer's actual
+            // mid-thickness at THIS frame — fixing the curved-stringer
+            // elevation offset. For straight stringers, section.MidAnchor
+            // already lies on stringerInfo.MidPlane, so the new plane is
+            // identical to the old one and 20c.13 behavior is preserved.
+            Plane localStringerMidPlane = new Plane(
+                section.MidAnchor, stringerInfo.MidPlane.Normal);
+            Point3d framePivot = localStringerMidPlane.ClosestPoint(stringerBottomAnchor);
             Point3d frameAnchorForCut = framePivot + nf * midPlaneOffset;
             // Phase 20c.10: stringer cut now sources from the section's
             // BOTTOM anchor and extends UPWARD (+upDir), matching the
@@ -517,9 +533,18 @@ namespace SeaNest.Commands
             // the same stringerBottomAnchor.Z, so they coincide.
             //
             // Phase 20c.13: project onto frame's mid-plane for symmetric
-            // width-centering on the frame's mid-thickness.
+            // width-centering on the frame's mid-thickness. The frame is
+            // planar (or treated as such), so frameInfo.MidPlane IS the
+            // local mid-thickness plane — no section-based correction
+            // needed here (unlike the frame anchor, which had to be
+            // local-corrected for curved stringers in Phase 20c.14).
             Point3d stringerPivot = frameInfo.MidPlane.ClosestPoint(stringerBottomAnchor);
             Point3d stringerAnchorForCut = stringerPivot;
+
+            RhinoApp.WriteLine(string.Format(
+                "    framePivot=({0:F2}, {1:F2}, {2:F2}), stringerPivot=({3:F2}, {4:F2}, {5:F2})",
+                framePivot.X, framePivot.Y, framePivot.Z,
+                stringerPivot.X, stringerPivot.Y, stringerPivot.Z));
 
             // Phase 20b.1b / 20c.10: frame and stringer stadia share the
             // same generic primitive. Both open from the stringer's
