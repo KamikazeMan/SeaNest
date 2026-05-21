@@ -422,63 +422,39 @@ namespace SeaNest.Commands
             if (stringerOutline.Length == 0)
                 throw new Exception("stringer mid-plane section returned no curves");
 
-            // Anchors: where the joint line crosses each outline.
-            // Phase 20c.1: each anchor lookup falls back to BrepBrep
-            // intersection if the mid-plane outline misses.
-            // Phase 20c.2: BrepBrep fallback is filtered by proximity to
-            // the joint line — discards spurious brush-contact points
-            // for curved members.
-            // Phase 20c.3: cutoff = 10× MAX thickness (was 5× sum). The
-            // max-based formula tracks the larger part's geometry more
-            // faithfully when thicknesses differ — a thick plate's
-            // legitimate curvature-displaced joint can spread further
-            // than the sum-based formula would tolerate.
-            // Phase 20c.6: frameBottomAnchor lookup removed — the
-            // rat-hole / frame-slot anchor is the stringer's bottom
-            // contact with the frame (stringerBottomAnchor), not the
-            // frame's geometric bottom.
+            // Phase 20c.10 — anchor derivation via local stringer section.
+            // ChatGPT analysis flagged that prior phases conflated plate
+            // MATERIAL thickness (perpendicular to mid-plane, ~0.25") with
+            // stringer WEB HEIGHT (e.g. 6"). Phase 20c.8's slot height
+            // came from material thickness, producing 0.125"-tall slots —
+            // invisible at scale.
             //
-            // Phase 20c.8: stringerTopAnchor lookup removed too. The
-            // BrepBrep fallback's top/bottom extremes can collapse to
-            // identical points for curved-stringer geometry where the
-            // intersection forms a narrow contact band, producing
-            // zero-height slots. Instead, derive stringerTopAnchor and
-            // stringerMidPoint from stringerBottomAnchor + the stringer's
-            // thickness along upDir. This produces consistent slot
-            // shapes (always thickness-tall) for both straight and
-            // curved geometries — matches the working straight-stringer
-            // case where the BrepBrep extents already gave thickness.
-            double maxJointDistance = Math.Max(frameInfo.Thickness, stringerInfo.Thickness) * 10.0;
+            // Fix: section the stringer with the FRAME'S mid-plane
+            // (well-defined and stable for straight or curved stringers)
+            // and read the actual bottom/top from the section's worldUp
+            // extent. The web height comes from real geometry at the
+            // joint location, not from an unrelated thickness scalar.
+            //
+            // Replaces ResolveAnchorWithFallback for stringer anchors.
+            // (Helper retained for SeaNestSlotsCommand's separate use.)
+            var section = JointGeometryHelpers.ComputeLocalStringerSectionAtFrame(
+                stringer, frameInfo.MidPlane, worldUp, tol);
 
-            var (stringerBottomAnchor, usedFallback) =
-                ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: false,
-                    stringer, frame, "stringer", "bottom", maxJointDistance, tol);
+            RhinoApp.WriteLine(string.Format(
+                "    local stringer section: bottom=({0:F2}, {1:F2}, {2:F2}), top=({3:F2}, {4:F2}, {5:F2}), webHeight={6:F3}",
+                section.BottomAnchor.X, section.BottomAnchor.Y, section.BottomAnchor.Z,
+                section.TopAnchor.X, section.TopAnchor.Y, section.TopAnchor.Z,
+                section.WebHeight));
 
-            // Phase 20c.9: BrepBrep fallback returns the contact-band
-            // center, not the stringer's actual bottom face. When the
-            // fallback path was used, shift the anchor DOWN by half the
-            // stringer's thickness so it lands at the true outer bottom
-            // face. The outline-hit primary path already returns the
-            // correct bottom point and needs no shift.
-            if (usedFallback)
-            {
-                stringerBottomAnchor -= upDir * (stringerInfo.Thickness * 0.5);
-            }
+            Point3d stringerBottomAnchor = section.BottomAnchor;
+            Point3d stringerTopAnchor = section.TopAnchor;
+            Point3d stringerMidPoint = section.MidAnchor;
 
-            // Phase 20c.8: derive stringerTopAnchor and stringerMidPoint
-            // from the stringer's own thickness along upDir, not from
-            // BrepBrep extents.
-            Point3d stringerTopAnchor = stringerBottomAnchor + upDir * stringerInfo.Thickness;
-            Point3d stringerMidPoint = stringerBottomAnchor + upDir * (stringerInfo.Thickness * 0.5);
-
-            // Cut heights along the joint centerline. These are CHORD
-            // positions (where each stadium's straight portion ends and
-            // the dome cap begins) — NOT the dome apex.
-            // Phase 20c.6: frame slot height measured from
-            // stringerBottomAnchor (the stringer's actual bottom contact)
-            // up to stringerMidPoint, not from the frame's bottom edge.
-            double frameCutHeight = JointGeometryHelpers.DistanceAlong(stringerBottomAnchor, stringerMidPoint, upDir);
-            double stringerSlotDepth = JointGeometryHelpers.DistanceAlong(stringerMidPoint, stringerTopAnchor, upDir);
+            // Slot heights: half the real web height. Each slot extends
+            // from its face to the mid-height, so the two slots mate
+            // watertight at the stringer's centerline.
+            double frameCutHeight = section.WebHeight * 0.5;
+            double stringerSlotDepth = section.WebHeight * 0.5;
 
             if (frameCutHeight <= tol)
                 throw new Exception("frame cut height ≤ 0");
@@ -518,17 +494,20 @@ namespace SeaNest.Commands
             // cases — no compensating shift needed.
             double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
             Point3d frameAnchorForCut = stringerBottomAnchor + nf * midPlaneOffset;
-            Point3d stringerAnchorForCut = stringerTopAnchor + ns * midPlaneOffset;
+            // Phase 20c.10: stringer cut now sources from the section's
+            // BOTTOM anchor and extends UPWARD (+upDir), matching the
+            // frame's slot which opens upward from the same bottom
+            // contact. Both slots meet watertight at the stringer's
+            // mid-height. Replaces prior top-down stringer cut.
+            Point3d stringerAnchorForCut = stringerBottomAnchor + ns * midPlaneOffset;
 
-            // Phase 20b.1b: frame's stadium and member's stadium both go
-            // through the shared generic stadium-cutter primitive. The
-            // direction the slot extends from each anchor INTO the body
-            // is the only thing that differs:
-            //   - Frame: anchor on bottom edge → slot extends +upDir
-            //   - Member: anchor on top edge → slot extends -upDir
-            // Rat-hole cylinder is rat-hole-specific (BuildRatHoleCylinder
-            // below); it's added to the frame's cutter list alongside the
-            // stadium.
+            // Phase 20b.1b / 20c.10: frame and stringer stadia share the
+            // same generic primitive. Both open from the stringer's
+            // bottom contact:
+            //   - Frame: anchor at bottom contact → slot extends +upDir
+            //   - Stringer: anchor at bottom contact → slot extends +upDir
+            // They cross watertight at the stringer's mid-height (where
+            // each stadium's chord lands).
             var frameStadium = JointGeometryHelpers.BuildStadiumSlotCutter(
                 frameAnchorForCut, nf, frameWidthDir, upDir,
                 frameSlotWidth, frameCutHeight,
@@ -540,7 +519,7 @@ namespace SeaNest.Commands
                 : frameStadium;
 
             Brep[] stringerCutters = JointGeometryHelpers.BuildStadiumSlotCutter(
-                stringerAnchorForCut, ns, stringerWidthDir, -upDir,
+                stringerAnchorForCut, ns, stringerWidthDir, upDir,
                 stringerSlotWidth, stringerSlotDepth,
                 cutterDepth, tol);
 

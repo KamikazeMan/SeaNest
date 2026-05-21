@@ -523,5 +523,89 @@ namespace SeaNest.Geometry
             try { return brep.GetBoundingBox(true).Diagonal.Length; } catch { }
             return 0;
         }
+
+        // ---------------------------------------------------------------
+        // Phase 20c.10 — local stringer section at frame mid-plane
+        // ---------------------------------------------------------------
+
+        /// <summary>
+        /// Phase 20c.10 — local stringer cross-section sampled at the
+        /// frame's mid-plane. Used to recover the stringer's actual web
+        /// height and the true bottom/top anchors at this specific joint,
+        /// independent of stringer curvature.
+        ///
+        /// Replaces the prior anchor-derivation chain that conflated the
+        /// plate's MATERIAL thickness (perpendicular to the mid-plane,
+        /// ~0.25") with the stringer's WEB HEIGHT (the dimension it
+        /// stands at, e.g. 6"). The local section gives the real web
+        /// profile at the frame; its worldUp extent is the web height.
+        /// </summary>
+        public sealed class LocalStringerSection
+        {
+            public Point3d BottomAnchor;
+            public Point3d TopAnchor;
+            public Point3d MidAnchor;
+            public Vector3d HeightDir;
+            public double WebHeight;
+        }
+
+        /// <summary>
+        /// Section the stringer with the frame's mid-plane and find the
+        /// extremes of the resulting curve along <paramref name="worldUp"/>.
+        /// Samples each section curve at 101 points to find true min/max
+        /// projections — robust for both straight rectangular sections and
+        /// curved/skewed sections from oblique frame crossings.
+        ///
+        /// Throws if the section is empty (frame mid-plane misses the
+        /// stringer entirely).
+        /// </summary>
+        public static LocalStringerSection ComputeLocalStringerSectionAtFrame(
+            Brep stringer, Plane frameMidPlane, Vector3d worldUp, double tol)
+        {
+            if (!Intersection.BrepPlane(stringer, frameMidPlane, tol,
+                    out Curve[] sectionCurves, out _))
+                throw new Exception("BrepPlane(stringer, frame mid-plane) failed.");
+            if (sectionCurves == null || sectionCurves.Length == 0)
+                throw new Exception("Stringer has no section at frame mid-plane.");
+
+            Vector3d heightDir = worldUp;
+            if (!heightDir.Unitize())
+                throw new Exception("worldUp degenerate in ComputeLocalStringerSectionAtFrame.");
+
+            double minProj = double.MaxValue;
+            double maxProj = double.MinValue;
+            Point3d lowestPoint = Point3d.Origin;
+            Point3d highestPoint = Point3d.Origin;
+            bool any = false;
+
+            foreach (var c in sectionCurves)
+            {
+                if (c == null) continue;
+                for (int i = 0; i <= 100; i++)
+                {
+                    double t = c.Domain.ParameterAt(i / 100.0);
+                    Point3d p = c.PointAt(t);
+                    double proj = p.X * heightDir.X + p.Y * heightDir.Y + p.Z * heightDir.Z;
+                    if (proj < minProj) { minProj = proj; lowestPoint = p; }
+                    if (proj > maxProj) { maxProj = proj; highestPoint = p; }
+                    any = true;
+                }
+            }
+
+            if (!any)
+                throw new Exception("Stringer section curves contained no sample points.");
+
+            Point3d mid = lowestPoint + 0.5 * (highestPoint - lowestPoint);
+            double webHeight = lowestPoint.DistanceTo(highestPoint);
+
+            return new LocalStringerSection
+            {
+                BottomAnchor = lowestPoint,
+                TopAnchor = highestPoint,
+                MidAnchor = mid,
+                HeightDir = heightDir,
+                WebHeight = webHeight,
+            };
+        }
     }
 }
