@@ -424,11 +424,17 @@ namespace SeaNest.Commands
             // faithfully when thicknesses differ — a thick plate's
             // legitimate curvature-displaced joint can spread further
             // than the sum-based formula would tolerate.
+            // Phase 20c.6: frameBottomAnchor lookup removed — the
+            // rat-hole / frame-slot anchor is the stringer's bottom
+            // contact with the frame (stringerBottomAnchor), not the
+            // frame's geometric bottom. Rationale: rat-hole's purpose
+            // is weld continuity at the joint corner where the stringer's
+            // body meets the frame, not at the frame's overall bottom
+            // edge. For horizontal stringers at the floor the two
+            // coincide; for curved stringers at elevation they differ
+            // (cuts now follow the joint elevation as expected).
             double maxJointDistance = Math.Max(frameInfo.Thickness, stringerInfo.Thickness) * 10.0;
 
-            Point3d frameBottomAnchor =
-                ResolveAnchorWithFallback(frameOutline, jointLine, upDir, findTop: false,
-                    frame, stringer, "frame", "bottom", maxJointDistance, tol);
             Point3d stringerTopAnchor =
                 ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: true,
                     stringer, frame, "stringer", "top", maxJointDistance, tol);
@@ -444,7 +450,10 @@ namespace SeaNest.Commands
             // Cut heights along the joint centerline. These are CHORD
             // positions (where each stadium's straight portion ends and
             // the dome cap begins) — NOT the dome apex.
-            double frameCutHeight = JointGeometryHelpers.DistanceAlong(frameBottomAnchor, stringerMidPoint, upDir);
+            // Phase 20c.6: frame slot height measured from
+            // stringerBottomAnchor (the stringer's actual bottom contact)
+            // up to stringerMidPoint, not from the frame's bottom edge.
+            double frameCutHeight = JointGeometryHelpers.DistanceAlong(stringerBottomAnchor, stringerMidPoint, upDir);
             double stringerSlotDepth = JointGeometryHelpers.DistanceAlong(stringerMidPoint, stringerTopAnchor, upDir);
 
             if (frameCutHeight <= tol)
@@ -471,8 +480,13 @@ namespace SeaNest.Commands
 
             // Offset each cutter's center off the plate's mid-plane to
             // break face-coincidence with Rhino's boolean algorithm.
+            // Phase 20c.6: frame anchor sources from stringerBottomAnchor
+            // (the joint corner where the stringer's bottom edge touches
+            // the frame) rather than from a separate frameBottomAnchor.
+            // Both the frame's stadium slot AND the rat-hole cylinder
+            // pin to this anchor.
             double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
-            Point3d frameAnchorForCut = frameBottomAnchor + nf * midPlaneOffset;
+            Point3d frameAnchorForCut = stringerBottomAnchor + nf * midPlaneOffset;
             Point3d stringerAnchorForCut = stringerTopAnchor + ns * midPlaneOffset;
 
             // Phase 20b.1b: frame's stadium and member's stadium both go
@@ -503,7 +517,7 @@ namespace SeaNest.Commands
             {
                 FrameCutters = frameCutters,
                 StringerCutters = stringerCutters,
-                FrameBottomAnchor = frameBottomAnchor,
+                FrameBottomAnchor = stringerBottomAnchor,   // Phase 20c.6: cuts anchor at stringer's bottom contact
                 StringerTopAnchor = stringerTopAnchor,
                 StringerMidPoint = stringerMidPoint,
                 UpDir = upDir,
