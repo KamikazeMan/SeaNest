@@ -59,9 +59,18 @@ namespace SeaNest.Commands
         private const double ParallelRejectSinThreshold = 0.05;
 
         // Cutter extrusion depth multiplier. Cutter passes through plate's
-        // thickness by this factor on each side (so 2× total). Phase 20a.7.4:
-        // 4.0 → 2.0 to avoid pathological boolean inputs from huge overshoot.
-        private const double CutterOvercutFactor = 2.0;
+        // thickness by this factor on each side (so 2× total).
+        //
+        // Phase 20a.7.4: reduced from 4.0 → 2.0 to avoid pathological
+        // boolean inputs from huge overshoot. Phase 20c.7: restored to
+        // 4.0 because curved-stringer geometry produces anchors offset
+        // from the frame's mid-plane along the frame normal — at 2.0
+        // the cutter could fail to span the full thickness on one side.
+        // The failure modes that originally motivated the reduction
+        // (face-coincidence, inward orientation) now have explicit
+        // mitigations (CutterMidPlaneOffsetFactor + EnsureOutwardOrientation),
+        // so the larger margin is safe to re-introduce.
+        private const double CutterOvercutFactor = 4.0;
 
         // Phase 20a.7.4: offset the cutter centroid off the plate's
         // mid-plane by this multiple of modelTol. Breaks face-coincidence
@@ -485,8 +494,24 @@ namespace SeaNest.Commands
             // the frame) rather than from a separate frameBottomAnchor.
             // Both the frame's stadium slot AND the rat-hole cylinder
             // pin to this anchor.
+            //
+            // Phase 20c.7: shift the frame anchor toward the stringer's
+            // outer bottom face when the stringer's mid-plane normal has
+            // significant projection onto upDir. In that geometry the
+            // stringer's mid-plane outline is at mid-thickness (offset
+            // by stringerThickness/2 from the outer bottom face), so the
+            // anchor needs to move +upDir × half-thickness to align with
+            // the visible bottom of the stringer. When the mid-plane is
+            // parallel to upDir (the horizontal-stringer case), the mid-
+            // plane outline IS at the stringer's outer bottom Z and no
+            // shift is needed — the |ns·upDir| > 0.5 gate avoids that
+            // regression.
             double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
             Point3d frameAnchorForCut = stringerBottomAnchor + nf * midPlaneOffset;
+            if (Math.Abs(ns * upDir) > 0.5)
+            {
+                frameAnchorForCut += upDir * (stringerInfo.Thickness / 2.0);
+            }
             Point3d stringerAnchorForCut = stringerTopAnchor + ns * midPlaneOffset;
 
             // Phase 20b.1b: frame's stadium and member's stadium both go
