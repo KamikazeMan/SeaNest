@@ -440,12 +440,6 @@ namespace SeaNest.Commands
             var section = JointGeometryHelpers.ComputeLocalStringerSectionAtFrame(
                 stringer, frameInfo.MidPlane, worldUp, tol);
 
-            RhinoApp.WriteLine(string.Format(
-                "    local stringer section: bottom=({0:F2}, {1:F2}, {2:F2}), top=({3:F2}, {4:F2}, {5:F2}), webHeight={6:F3}",
-                section.BottomAnchor.X, section.BottomAnchor.Y, section.BottomAnchor.Z,
-                section.TopAnchor.X, section.TopAnchor.Y, section.TopAnchor.Z,
-                section.WebHeight));
-
             Point3d stringerBottomAnchor = section.BottomAnchor;
             Point3d stringerTopAnchor = section.TopAnchor;
             Point3d stringerMidPoint = section.MidAnchor;
@@ -540,11 +534,6 @@ namespace SeaNest.Commands
             // local-corrected for curved stringers in Phase 20c.14).
             Point3d stringerPivot = frameInfo.MidPlane.ClosestPoint(stringerBottomAnchor);
             Point3d stringerAnchorForCut = stringerPivot;
-
-            RhinoApp.WriteLine(string.Format(
-                "    framePivot=({0:F2}, {1:F2}, {2:F2}), stringerPivot=({3:F2}, {4:F2}, {5:F2})",
-                framePivot.X, framePivot.Y, framePivot.Z,
-                stringerPivot.X, stringerPivot.Y, stringerPivot.Z));
 
             // Phase 20b.1b / 20c.10: frame and stringer stadia share the
             // same generic primitive. Both open from the stringer's
@@ -655,11 +644,7 @@ namespace SeaNest.Commands
                 jointLine, maxJointDistance, tol);
             if (fallback.HasValue)
             {
-                var pt = fallback.Value;
-                RhinoApp.WriteLine(string.Format(
-                    "    fallback anchor ({0} {1}): ({2:F2}, {3:F2}, {4:F2}).",
-                    partLabel, positionLabel, pt.X, pt.Y, pt.Z));
-                return (pt, true);
+                return (fallback.Value, true);
             }
 
             throw new Exception(string.Format(
