@@ -493,7 +493,16 @@ namespace SeaNest.Commands
             // stringer's outer bottom face for both straight and curved
             // cases — no compensating shift needed.
             double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
-            Point3d frameAnchorForCut = stringerBottomAnchor + nf * midPlaneOffset;
+            // Phase 20c.13: project stringerBottomAnchor onto the MATING
+            // part's mid-plane to center each slot's WIDTH on the mating
+            // part's mid-thickness. Without this, slot widths are centered
+            // on the anchor (= stringer's bottom face), leaving asymmetric
+            // clearance (contact on one side, ~thickness/2 gap on the
+            // other). Plane.ClosestPoint subtracts the component along the
+            // mid-plane's normal, which is perpendicular to upDir (because
+            // upDir ∝ nf × ns), so slot elevation along upDir is unchanged.
+            Point3d framePivot = stringerInfo.MidPlane.ClosestPoint(stringerBottomAnchor);
+            Point3d frameAnchorForCut = framePivot + nf * midPlaneOffset;
             // Phase 20c.10: stringer cut now sources from the section's
             // BOTTOM anchor and extends UPWARD (+upDir), matching the
             // frame's slot which opens upward from the same bottom
@@ -506,7 +515,11 @@ namespace SeaNest.Commands
             // by ~2×tol, leaving the frame's and stringer's chords
             // misaligned at mid-height. Both chord Zs now derive from
             // the same stringerBottomAnchor.Z, so they coincide.
-            Point3d stringerAnchorForCut = stringerBottomAnchor;
+            //
+            // Phase 20c.13: project onto frame's mid-plane for symmetric
+            // width-centering on the frame's mid-thickness.
+            Point3d stringerPivot = frameInfo.MidPlane.ClosestPoint(stringerBottomAnchor);
+            Point3d stringerAnchorForCut = stringerPivot;
 
             // Phase 20b.1b / 20c.10: frame and stringer stadia share the
             // same generic primitive. Both open from the stringer's
