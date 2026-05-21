@@ -343,6 +343,15 @@ namespace SeaNest.Geometry
         /// Cutter is extruded along <paramref name="plateNormal"/> by
         /// <paramref name="cutterDepth"/> and centered on the plate's
         /// mid-plane via <see cref="ExtrudeClosedPlanarCurve"/>.
+        ///
+        /// Phase 20c.11: optional <paramref name="flipDomeAcrossChord"/>
+        /// reflects the entire stadium profile across the chord at Y=+L.
+        /// The dome moves from Y=L+r to Y=L-r, and the open-mouth ends
+        /// (p0, p3) move from Y=-cutterDepth to Y=2L+cutterDepth — so the
+        /// whole cutter swings to the opposite side of the chord. The
+        /// anchor (slotPlane origin, Y=0) is no longer on the cutter.
+        /// Used by the rat-holes stringer cut to position the dome on
+        /// the opposite side of the chord from the frame's matching cut.
         /// </summary>
         public static Brep[] BuildStadiumSlotCutter(
             Point3d anchor,
@@ -352,24 +361,34 @@ namespace SeaNest.Geometry
             double slotWidth,
             double slotDepth,
             double cutterDepth,
-            double tol)
+            double tol,
+            bool flipDomeAcrossChord = false)
         {
             double r = slotWidth / 2.0;
             double L = slotDepth;
 
             var slotPlane = MakeSafeCutPlane(anchor, plateWidthDir, slotExtensionDir);
 
-            //   p0 = (-r, -cutterDepth)  open end, past plate edge in -extension direction
-            //   p1 = (-r, +L)            left chord endpoint at joint center
-            //   arcMid = (0, +(L + r))   apex of half-circle BEYOND the chord
-            //   p2 = (+r, +L)            right chord endpoint at joint center
-            //   p3 = (+r, -cutterDepth)  open end, past plate edge
-            //   close p3 → p0            open-end edge (past the plate's surface)
-            var p0 = slotPlane.PointAt(-r, -cutterDepth);
+            // Open-end Y and dome-apex Y depend on the flip flag.
+            // Default (false): open mouth at -cutterDepth, dome apex at L+r
+            //                  (body fills Y ∈ [-cutterDepth, +L], dome past chord).
+            // Flipped  (true): open mouth at 2L+cutterDepth, dome apex at L-r
+            //                  (body fills Y ∈ [+L, 2L+cutterDepth], dome on
+            //                   the anchor side of the chord).
+            double openY = flipDomeAcrossChord ? +(2.0 * L + cutterDepth) : -cutterDepth;
+            double domeApexY = flipDomeAcrossChord ? +(L - r) : +(L + r);
+
+            //   p0 = (-r, openY)    open end
+            //   p1 = (-r, +L)       left chord endpoint (on the flip axis)
+            //   arcMid = (0, domeApexY)   apex of half-circle past chord
+            //   p2 = (+r, +L)       right chord endpoint (on the flip axis)
+            //   p3 = (+r, openY)    open end
+            //   close p3 → p0       open-end edge
+            var p0 = slotPlane.PointAt(-r, openY);
             var p1 = slotPlane.PointAt(-r, +L);
-            var arcMid = slotPlane.PointAt(0, +(L + r));
+            var arcMid = slotPlane.PointAt(0, domeApexY);
             var p2 = slotPlane.PointAt(+r, +L);
-            var p3 = slotPlane.PointAt(+r, -cutterDepth);
+            var p3 = slotPlane.PointAt(+r, openY);
 
             var leftSide = new LineCurve(p0, p1);
             var topArc = new ArcCurve(new Arc(p1, arcMid, p2));

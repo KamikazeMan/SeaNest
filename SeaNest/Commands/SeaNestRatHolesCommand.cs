@@ -518,10 +518,14 @@ namespace SeaNest.Commands
                 ? frameStadium.Concat(new[] { ratHole }).ToArray()
                 : frameStadium;
 
+            // Phase 20c.11: stringer cut flips the stadium across the
+            // chord — dome bulges back toward the anchor side instead of
+            // past the chord. Frame's compound cutter stays default.
             Brep[] stringerCutters = JointGeometryHelpers.BuildStadiumSlotCutter(
                 stringerAnchorForCut, ns, stringerWidthDir, upDir,
                 stringerSlotWidth, stringerSlotDepth,
-                cutterDepth, tol);
+                cutterDepth, tol,
+                flipDomeAcrossChord: true);
 
             return new JointCutResult
             {
