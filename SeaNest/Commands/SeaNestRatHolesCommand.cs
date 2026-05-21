@@ -436,25 +436,29 @@ namespace SeaNest.Commands
             // Phase 20c.6: frameBottomAnchor lookup removed — the
             // rat-hole / frame-slot anchor is the stringer's bottom
             // contact with the frame (stringerBottomAnchor), not the
-            // frame's geometric bottom. Rationale: rat-hole's purpose
-            // is weld continuity at the joint corner where the stringer's
-            // body meets the frame, not at the frame's overall bottom
-            // edge. For horizontal stringers at the floor the two
-            // coincide; for curved stringers at elevation they differ
-            // (cuts now follow the joint elevation as expected).
+            // frame's geometric bottom.
+            //
+            // Phase 20c.8: stringerTopAnchor lookup removed too. The
+            // BrepBrep fallback's top/bottom extremes can collapse to
+            // identical points for curved-stringer geometry where the
+            // intersection forms a narrow contact band, producing
+            // zero-height slots. Instead, derive stringerTopAnchor and
+            // stringerMidPoint from stringerBottomAnchor + the stringer's
+            // thickness along upDir. This produces consistent slot
+            // shapes (always thickness-tall) for both straight and
+            // curved geometries — matches the working straight-stringer
+            // case where the BrepBrep extents already gave thickness.
             double maxJointDistance = Math.Max(frameInfo.Thickness, stringerInfo.Thickness) * 10.0;
 
-            Point3d stringerTopAnchor =
-                ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: true,
-                    stringer, frame, "stringer", "top", maxJointDistance, tol);
             Point3d stringerBottomAnchor =
                 ResolveAnchorWithFallback(stringerOutline, jointLine, upDir, findTop: false,
                     stringer, frame, "stringer", "bottom", maxJointDistance, tol);
 
-            Point3d stringerMidPoint = new Point3d(
-                (stringerTopAnchor.X + stringerBottomAnchor.X) * 0.5,
-                (stringerTopAnchor.Y + stringerBottomAnchor.Y) * 0.5,
-                (stringerTopAnchor.Z + stringerBottomAnchor.Z) * 0.5);
+            // Phase 20c.8: derive stringerTopAnchor and stringerMidPoint
+            // from the stringer's own thickness along upDir, not from
+            // BrepBrep extents.
+            Point3d stringerTopAnchor = stringerBottomAnchor + upDir * stringerInfo.Thickness;
+            Point3d stringerMidPoint = stringerBottomAnchor + upDir * (stringerInfo.Thickness * 0.5);
 
             // Cut heights along the joint centerline. These are CHORD
             // positions (where each stadium's straight portion ends and
@@ -495,23 +499,14 @@ namespace SeaNest.Commands
             // Both the frame's stadium slot AND the rat-hole cylinder
             // pin to this anchor.
             //
-            // Phase 20c.7: shift the frame anchor toward the stringer's
-            // outer bottom face when the stringer's mid-plane normal has
-            // significant projection onto upDir. In that geometry the
-            // stringer's mid-plane outline is at mid-thickness (offset
-            // by stringerThickness/2 from the outer bottom face), so the
-            // anchor needs to move +upDir × half-thickness to align with
-            // the visible bottom of the stringer. When the mid-plane is
-            // parallel to upDir (the horizontal-stringer case), the mid-
-            // plane outline IS at the stringer's outer bottom Z and no
-            // shift is needed — the |ns·upDir| > 0.5 gate avoids that
-            // regression.
+            // Phase 20c.8: removed Phase 20c.7's conditional half-thickness
+            // shift along upDir. With the new memberMidPoint logic (derived
+            // from stringer thickness instead of BrepBrep extents), the
+            // anchor at stringerBottomAnchor naturally sits at the
+            // stringer's outer bottom face for both straight and curved
+            // cases — no compensating shift needed.
             double midPlaneOffset = tol * CutterMidPlaneOffsetFactor;
             Point3d frameAnchorForCut = stringerBottomAnchor + nf * midPlaneOffset;
-            if (Math.Abs(ns * upDir) > 0.5)
-            {
-                frameAnchorForCut += upDir * (stringerInfo.Thickness / 2.0);
-            }
             Point3d stringerAnchorForCut = stringerTopAnchor + ns * midPlaneOffset;
 
             // Phase 20b.1b: frame's stadium and member's stadium both go
