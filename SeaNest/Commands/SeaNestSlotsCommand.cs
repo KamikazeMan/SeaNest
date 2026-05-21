@@ -305,13 +305,52 @@ namespace SeaNest.Commands
             Vector3d upDir = jointLine.Direction;
             if (!upDir.Unitize())
                 throw new Exception("joint centerline has zero length");
-            // Phase 20c.4 — reverted to world-Z sign-correction. See the
-            // matching comment in SeaNestRatHolesCommand for the full
-            // rationale (jointLine.PointAt(0.5) is parametrically arbitrary
-            // for Intersection.PlanePlane results, and the
-            // ClosestParameter alternative produces a perpendicular vector
-            // with zero dot product on upDir).
-            if (upDir * worldUp < 0.0) upDir.Reverse();
+            // Phase 20c.5 — body-relative sign-correction using BrepBrep
+            // intersection bbox center as the joint reference point. See
+            // the matching comment in SeaNestRatHolesCommand for full
+            // rationale. Falls back to world-Z when BrepBrep produces no
+            // usable curves or the body-relative dot is degenerate.
+            Point3d jointRegionCenter = Point3d.Origin;
+            bool haveRealReference = false;
+            try
+            {
+                if (Rhino.Geometry.Intersect.Intersection.BrepBrep(
+                        plate, member, tol, out Curve[] intCurves, out _)
+                    && intCurves != null && intCurves.Length > 0)
+                {
+                    var bb = BoundingBox.Empty;
+                    double minCurveLength = tol * 10.0;
+                    foreach (var c in intCurves)
+                    {
+                        if (c == null) continue;
+                        if (c.GetLength() < minCurveLength) continue;
+                        bb.Union(c.GetBoundingBox(true));
+                    }
+                    if (bb.IsValid)
+                    {
+                        jointRegionCenter = bb.Center;
+                        haveRealReference = true;
+                    }
+                }
+            }
+            catch { /* fall through to world-Z */ }
+
+            bool signCorrectedByBody = false;
+            if (haveRealReference)
+            {
+                var memberCenter = member.GetBoundingBox(true).Center;
+                var towardMember = memberCenter - jointRegionCenter;
+                double dot = upDir * towardMember;
+                if (Math.Abs(dot) > tol)
+                {
+                    if (dot < 0.0) upDir.Reverse();
+                    signCorrectedByBody = true;
+                }
+            }
+            if (!signCorrectedByBody)
+            {
+                if (upDir * worldUp < 0.0) upDir.Reverse();
+            }
 
             // Section both plates at their own mid-planes.
             Curve[] plateOutline = JointGeometryHelpers.SectionPlateAtMidPlane(plate, plateInfo.MidPlane, tol);

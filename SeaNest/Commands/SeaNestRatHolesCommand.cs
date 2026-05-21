@@ -338,28 +338,72 @@ namespace SeaNest.Commands
             Vector3d upDir = jointLine.Direction;
             if (!upDir.Unitize())
                 throw new Exception("joint centerline has zero length");
-            // Phase 20c.4 — reverted to world-Z sign-correction. Phase
-            // 20c.3's body-relative attempt (towardMember = memberCenter -
-            // jointMid) produced uniformly flipped cuts because:
-            //   (a) jointLine.PointAt(0.5) is at an arbitrary parametric
-            //       position on the line (Intersection.PlanePlane's From/To
-            //       are not geometrically anchored), so jointMid can land
-            //       far from the actual joint contact;
-            //   (b) Even with a corrected jointMid via ClosestParameter,
-            //       the resulting towardMember is perpendicular to the
-            //       joint-line direction (closest-point projection
-            //       minimizes distance → vector is perpendicular to line),
-            //       so upDir * towardMember = 0 and sign-correction is
-            //       undefined / driven by float noise.
+            // Phase 20c.5 — body-relative sign-correction using BrepBrep
+            // intersection center as the joint reference point. Phase
+            // 20c.4 reverted to world-Z because Phase 20c.3's
+            // jointLine.PointAt(0.5) was at an arbitrary parametric
+            // position. The fix: use a REAL 3D point at the actual
+            // joint location — the bbox center of the BrepBrep
+            // intersection curves between the two parts. That's a
+            // genuine geometric reference, not constrained to lie on
+            // the joint line, so towardMember has a meaningful
+            // component along upDir.
             //
-            // World-Z works for the typical vertical-member geometry that
-            // SeaNest targets. The "curved members mirrored" symptom that
-            // motivated 20c.3 was actually Phase 20c.1's unfiltered BrepBrep
-            // fallback returning spurious anchors — fixed by 20c.2's
-            // proximity filter, which remains in place. Horizontal-member
-            // geometry (joint line perpendicular to Z) is a separate
-            // unresolved case for any future phase.
-            if (upDir * worldUp < 0.0) upDir.Reverse();
+            // For horizontal-stringer / vertical-frame geometry where
+            // towardMember happens to be roughly perpendicular to upDir
+            // (the body-relative signal is degenerate), |dot| < tol and
+            // we fall back to world-Z. World-Z is the correct convention
+            // for that geometry too.
+            //
+            // Performance note: BrepBrep is also called in
+            // ResolveAnchorWithFallback's fallback path. Caching that
+            // result and reusing it here would eliminate the redundant
+            // call; deferred to a future phase if BrepBrep becomes a
+            // bottleneck.
+            Point3d jointRegionCenter = Point3d.Origin;
+            bool haveRealReference = false;
+            try
+            {
+                if (Rhino.Geometry.Intersect.Intersection.BrepBrep(
+                        frame, stringer, tol, out Curve[] intCurves, out _)
+                    && intCurves != null && intCurves.Length > 0)
+                {
+                    var bb = BoundingBox.Empty;
+                    double minCurveLength = tol * 10.0;
+                    foreach (var c in intCurves)
+                    {
+                        if (c == null) continue;
+                        if (c.GetLength() < minCurveLength) continue;
+                        bb.Union(c.GetBoundingBox(true));
+                    }
+                    if (bb.IsValid)
+                    {
+                        jointRegionCenter = bb.Center;
+                        haveRealReference = true;
+                    }
+                }
+            }
+            catch { /* fall through to world-Z */ }
+
+            bool signCorrectedByBody = false;
+            if (haveRealReference)
+            {
+                var memberCenter = stringer.GetBoundingBox(true).Center;
+                var towardMember = memberCenter - jointRegionCenter;
+                double dot = upDir * towardMember;
+                if (Math.Abs(dot) > tol)
+                {
+                    if (dot < 0.0) upDir.Reverse();
+                    signCorrectedByBody = true;
+                }
+            }
+            if (!signCorrectedByBody)
+            {
+                // Either no BrepBrep reference or the body-relative
+                // signal was degenerate. World-Z works for the typical
+                // vertical-member geometry the algorithm targets.
+                if (upDir * worldUp < 0.0) upDir.Reverse();
+            }
 
             // Section both plates at their own mid-planes.
             Curve[] frameOutline = JointGeometryHelpers.SectionPlateAtMidPlane(frame, frameInfo.MidPlane, tol);
