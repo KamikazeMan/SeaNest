@@ -499,7 +499,14 @@ namespace SeaNest.Commands
             // frame's slot which opens upward from the same bottom
             // contact. Both slots meet watertight at the stringer's
             // mid-height. Replaces prior top-down stringer cut.
-            Point3d stringerAnchorForCut = stringerBottomAnchor + ns * midPlaneOffset;
+            //
+            // Phase 20c.12: removed the `+ ns * midPlaneOffset` shift for
+            // the stringer anchor. For horizontal stringers, ns is
+            // vertical — that offset was dragging the stringer cut's Z
+            // by ~2×tol, leaving the frame's and stringer's chords
+            // misaligned at mid-height. Both chord Zs now derive from
+            // the same stringerBottomAnchor.Z, so they coincide.
+            Point3d stringerAnchorForCut = stringerBottomAnchor;
 
             // Phase 20b.1b / 20c.10: frame and stringer stadia share the
             // same generic primitive. Both open from the stringer's
