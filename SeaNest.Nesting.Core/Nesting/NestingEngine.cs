@@ -23,34 +23,25 @@ namespace SeaNest.Nesting.Core.Nesting
         /// <summary>Fixed step size for slide-tightening, in model units. BLF only.</summary>
         private const double SlideStep = 0.01;
 
-        /// <summary>
-        /// NFP-specific vertex cap. Tighter than BrepFlattener's 500 because Clipper2
-        /// MinkowskiDiff is super-linear in vertex count — pairs of 400v parts produced
-        /// 4–13s computes during Phase 6 testing. 200v reduces this to under 500ms in
-        /// typical cases (~5–10× speedup per NFP). Applied at <see cref="NestNFP"/>
-        /// entry only; the BLF path consumes <c>request.Polygons</c> directly with the
-        /// 500-cap variant from <c>BrepFlattener</c>.
-        /// </summary>
-        private const int NfpMaxVertices = 200;
+        // Phase 22a — NFP-only proxy simplification.
+        // These polygons are used only for NFP collision/placement. Original Rhino
+        // curves/native output remain untouched by the command draw path.
+        private const int NfpTargetVertices = 80;
 
-        /// <summary>
-        /// Initial tolerance for the NFP-specific second-pass simplification.
-        /// Matches BrepFlattener's flatten-time tolerance — for inputs already at or
-        /// below the 200-cap, this pass is a near-no-op. Only escalates when the input
-        /// is above the 200-cap.
-        /// </summary>
-        private const double NfpInitialTolerance = 0.005;
+        // Start below typical fabrication tolerance but high enough to collapse
+        // dense arc/polyline tessellation.
+        private const double NfpProxyInitialTolerance = 0.01;
 
-        /// <summary>Each escalation doubles the simplification tolerance.</summary>
-        private const double NfpEscalationFactor = 2.0;
+        // Escalate gradually instead of jumping straight to a coarse proxy.
+        private const double NfpProxyEscalationFactor = 1.5;
 
-        /// <summary>
-        /// Hard ceiling on tolerance escalation. With <see cref="NfpInitialTolerance"/>
-        /// = 0.005 and <see cref="NfpEscalationFactor"/> = 2.0, three escalations cap
-        /// at 0.04". Beyond this we surface a warning and proceed with the over-cap
-        /// polygon — better slow than wrong-shaped.
-        /// </summary>
-        private const int NfpMaxEscalations = 3;
+        // Production hard cap. 0.05" is below 1/16" kerf but close enough that
+        // we warn when the proxy still cannot reach the target.
+        private const double NfpProxyMaxTolerance = 0.05;
+
+        // Safety guards. These reject a proxy that changes the part too much.
+        private const double NfpProxyMaxAreaDriftFraction = 0.005; // 0.5%
+        private const double NfpProxyMaxBBoxDrift = 0.05;          // inches/model units
 
         /// <summary>Report progress (0..1) and status text. May be null.</summary>
         public Action<double, string> ProgressCallback { get; set; }
@@ -94,9 +85,9 @@ namespace SeaNest.Nesting.Core.Nesting
         {
             ProgressCallback?.Invoke(0.05, "Building part orientations...");
 
-            // NFP-specific simplification: tighter vertex cap than BrepFlattener's
-            // flatten-time 500. See NfpMaxVertices for the Phase 6b rationale.
-            // BLF path is unaffected — it consumes request.Polygons directly.
+            // Phase 22a — NFP-only proxy simplification. See NfpTargetVertices
+            // and BuildNfpProxy. BLF path is unaffected — it consumes
+            // request.Polygons directly.
             var nfpPolygons = SimplifyForNfp(request.Polygons);
 
             // Step 1: Build all oriented variants. Mirror and rotation baked into each.
@@ -246,36 +237,167 @@ namespace SeaNest.Nesting.Core.Nesting
         private List<Polygon> SimplifyForNfp(IReadOnlyList<Polygon> polygons)
         {
             var result = new List<Polygon>(polygons.Count);
+
             for (int i = 0; i < polygons.Count; i++)
             {
                 var raw = polygons[i];
-                var simplified = raw.SimplifyToTarget(
-                    NfpInitialTolerance, NfpMaxVertices,
-                    NfpEscalationFactor, NfpMaxEscalations,
-                    out double finalTol);
-
-                if (simplified.Count > NfpMaxVertices)
-                {
-                    // Even at max-escalation tolerance the cap couldn't be met. This
-                    // polygon will dominate MinkowskiDiff cost; surface so the user
-                    // can investigate the source Brep's discretization.
-                    DiagnosticCallback?.Invoke(
-                        $"NFP simplification: part {i} stayed at {simplified.Count} verts " +
-                        $"at tolerance {finalTol:G3}\" (NFP cap is {NfpMaxVertices}). " +
-                        $"Already past the broader BrepFlattener 500-cap — consider remeshing the source " +
-                        $"Brep at a coarser angle tolerance.");
-                }
-                else if (finalTol > NfpInitialTolerance + 1e-12)
-                {
-                    DiagnosticCallback?.Invoke(
-                        $"NFP simplification: part {i} reduced from {raw.Count} to {simplified.Count} verts " +
-                        $"at tolerance {finalTol:G3}\" (escalated from {NfpInitialTolerance:G3}\" " +
-                        $"because raw exceeded {NfpMaxVertices}-vertex NFP cap).");
-                }
-
-                result.Add(simplified);
+                var proxy = BuildNfpProxy(raw, i);
+                result.Add(proxy);
             }
+
             return result;
+        }
+
+        private Polygon BuildNfpProxy(Polygon raw, int partIndex)
+        {
+            if (raw == null)
+                throw new ArgumentNullException(nameof(raw));
+
+            if (raw.Count <= 3)
+                return raw;
+
+            Polygon bestSafe = raw;
+            double bestTol = 0.0;
+            double bestAreaDrift = 0.0;
+            double bestWidthDrift = 0.0;
+            double bestHeightDrift = 0.0;
+            bool foundSafe = false;
+
+            double tol = NfpProxyInitialTolerance;
+
+            while (tol <= NfpProxyMaxTolerance + 1e-12)
+            {
+                Polygon candidate;
+
+                try
+                {
+                    candidate = raw.SimplifyDouglasPeucker(tol);
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticCallback?.Invoke(
+                        $"NFP proxy: part {partIndex} simplification failed at tolerance {tol:G4}: {ex.Message}. Using best safe proxy.");
+                    break;
+                }
+
+                if (!IsAcceptableNfpProxy(
+                        raw,
+                        candidate,
+                        out double areaDrift,
+                        out double widthDrift,
+                        out double heightDrift,
+                        out string rejectReason))
+                {
+                    DiagnosticCallback?.Invoke(
+                        $"NFP proxy: part {partIndex} rejected tolerance {tol:G4}\" — {rejectReason}. " +
+                        $"Using {(foundSafe ? "best previous safe proxy" : "raw polygon")}.");
+
+                    break;
+                }
+
+                foundSafe = true;
+                bestSafe = candidate;
+                bestTol = tol;
+                bestAreaDrift = areaDrift;
+                bestWidthDrift = widthDrift;
+                bestHeightDrift = heightDrift;
+
+                if (candidate.Count <= NfpTargetVertices)
+                    break;
+
+                tol *= NfpProxyEscalationFactor;
+            }
+
+            if (!foundSafe)
+                return raw;
+
+            if (bestSafe.Count < raw.Count)
+            {
+                DiagnosticCallback?.Invoke(
+                    $"NFP proxy: part {partIndex} reduced {raw.Count} -> {bestSafe.Count} verts " +
+                    $"at tol {bestTol:G4}\"; area drift {bestAreaDrift:P2}, " +
+                    $"bbox drift W={bestWidthDrift:G4}\", H={bestHeightDrift:G4}\".");
+            }
+
+            if (bestSafe.Count > NfpTargetVertices)
+            {
+                DiagnosticCallback?.Invoke(
+                    $"NFP proxy: part {partIndex} still has {bestSafe.Count} verts after max safe tolerance " +
+                    $"{bestTol:G4}\". Target is {NfpTargetVertices}. This part may still dominate NFP runtime.");
+            }
+
+            return bestSafe;
+        }
+
+        private static bool IsAcceptableNfpProxy(
+            Polygon raw,
+            Polygon candidate,
+            out double areaDriftFraction,
+            out double widthDrift,
+            out double heightDrift,
+            out string rejectReason)
+        {
+            areaDriftFraction = 0.0;
+            widthDrift = 0.0;
+            heightDrift = 0.0;
+            rejectReason = null;
+
+            if (candidate == null)
+            {
+                rejectReason = "candidate is null";
+                return false;
+            }
+
+            if (candidate.Count < 3)
+            {
+                rejectReason = "candidate has fewer than 3 vertices";
+                return false;
+            }
+
+            double rawArea = raw.AbsoluteArea;
+            double candidateArea = candidate.AbsoluteArea;
+
+            if (rawArea <= 1e-12 || candidateArea <= 1e-12)
+            {
+                rejectReason = "zero or near-zero area";
+                return false;
+            }
+
+            areaDriftFraction = Math.Abs(candidateArea - rawArea) / rawArea;
+
+            var rawBox = raw.BoundingBox;
+            var candidateBox = candidate.BoundingBox;
+
+            double rawWidth = rawBox.MaxX - rawBox.MinX;
+            double rawHeight = rawBox.MaxY - rawBox.MinY;
+            double candidateWidth = candidateBox.MaxX - candidateBox.MinX;
+            double candidateHeight = candidateBox.MaxY - candidateBox.MinY;
+
+            widthDrift = Math.Abs(candidateWidth - rawWidth);
+            heightDrift = Math.Abs(candidateHeight - rawHeight);
+
+            if (areaDriftFraction > NfpProxyMaxAreaDriftFraction)
+            {
+                rejectReason =
+                    $"area drift {areaDriftFraction:P2} exceeds limit {NfpProxyMaxAreaDriftFraction:P2}";
+                return false;
+            }
+
+            if (widthDrift > NfpProxyMaxBBoxDrift)
+            {
+                rejectReason =
+                    $"bbox width drift {widthDrift:G4}\" exceeds limit {NfpProxyMaxBBoxDrift:G4}\"";
+                return false;
+            }
+
+            if (heightDrift > NfpProxyMaxBBoxDrift)
+            {
+                rejectReason =
+                    $"bbox height drift {heightDrift:G4}\" exceeds limit {NfpProxyMaxBBoxDrift:G4}\"";
+                return false;
+            }
+
+            return true;
         }
 
         // ==================================================================
