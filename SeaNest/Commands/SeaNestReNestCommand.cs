@@ -33,6 +33,13 @@ namespace SeaNest.Commands
         private const double DefaultMarginIn = 0.25;
         private const double DefaultSpacingIn = 0.25;
 
+        // Phase 22c — ReNest is a polish/improve pass; default to the smart
+        // engine. Nest defaults to BLF for Phase 1 compatibility; ReNest
+        // doesn't carry that constraint.
+        private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.NFP_Annealed;
+        private const bool DefaultAllowMirror = true;
+        private const double DefaultTimeBudgetSeconds = 30.0;
+
         // Phase 18 — match BrepFlattener's vertex cap so the engine never sees
         // a curve's raw chord-tessellation. Original Rhino Curve is preserved
         // separately for visual output (see outerCurvePerPart below).
@@ -50,8 +57,10 @@ namespace SeaNest.Commands
                 ? RhinoMath.UnitScale(UnitSystem.Inches, doc.ModelUnitSystem)
                 : 1.0;
 
-            double sheetW, sheetH, sheetT, margin, spacing;
+            double sheetW, sheetH, sheetT, margin, spacing, timeBudgetSeconds;
             RotationStep rotStep;
+            NestingAlgorithm algorithm;
+            bool allowMirror;
 
             if (!SeaNestNestCommand.PromptForDouble(doc, "Sheet width", DefaultSheetWidthIn * inToModel, out sheetW)) return Rhino.Commands.Result.Cancel;
             if (!SeaNestNestCommand.PromptForDouble(doc, "Sheet height", DefaultSheetHeightIn * inToModel, out sheetH)) return Rhino.Commands.Result.Cancel;
@@ -59,6 +68,39 @@ namespace SeaNest.Commands
             if (!SeaNestNestCommand.PromptForDouble(doc, "Margin", DefaultMarginIn * inToModel, out margin)) return Rhino.Commands.Result.Cancel;
             if (!SeaNestNestCommand.PromptForDouble(doc, "Spacing", DefaultSpacingIn * inToModel, out spacing)) return Rhino.Commands.Result.Cancel;
             if (!SeaNestNestCommand.PromptForRotation(out rotStep)) return Rhino.Commands.Result.Cancel;
+
+            // Phase 22c — same algorithm chooser as Nest, but ReNest's default
+            // (on Enter) is NFP_Annealed via the overload.
+            if (!SeaNestNestCommand.PromptForAlgorithm(DefaultAlgorithm, out algorithm))
+                return Rhino.Commands.Result.Cancel;
+
+            // Mirror and TimeBudget are only meaningful for NFP paths. Skip
+            // those prompts for BLF (matches Nest's behavior).
+            if (algorithm == NestingAlgorithm.BLF)
+            {
+                allowMirror = false;
+                timeBudgetSeconds = DefaultTimeBudgetSeconds;
+            }
+            else
+            {
+                if (!SeaNestNestCommand.PromptForBool("Allow part mirroring", DefaultAllowMirror, out allowMirror))
+                    return Rhino.Commands.Result.Cancel;
+
+                if (algorithm == NestingAlgorithm.NFP_Annealed)
+                {
+                    if (!SeaNestNestCommand.PromptForDouble(doc, "Time budget (seconds)", DefaultTimeBudgetSeconds, out timeBudgetSeconds))
+                        return Rhino.Commands.Result.Cancel;
+                    if (timeBudgetSeconds <= 0)
+                    {
+                        RhinoApp.WriteLine("Time budget must be positive.");
+                        return Rhino.Commands.Result.Failure;
+                    }
+                }
+                else
+                {
+                    timeBudgetSeconds = DefaultTimeBudgetSeconds;
+                }
+            }
 
             var go = new GetObject();
             go.SetCommandPrompt("Select curves and labels to re-nest");
@@ -337,7 +379,11 @@ namespace SeaNest.Commands
             NestRequest request;
             try
             {
-                request = new NestRequest(polygons, sheetW, sheetH, sheetT, margin, spacing, rotStep);
+                request = new NestRequest(
+                    polygons, sheetW, sheetH, sheetT, margin, spacing, rotStep,
+                    algorithm,
+                    allowMirror,
+                    TimeSpan.FromSeconds(timeBudgetSeconds));
             }
             catch (ArgumentException ex)
             {
@@ -358,7 +404,8 @@ namespace SeaNest.Commands
                     {
                         dialog.UpdateStatus(msg);
                         Application.Instance.RunIteration();
-                    }
+                    },
+                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg)
                 };
                 response = engine.Nest(request);
             }

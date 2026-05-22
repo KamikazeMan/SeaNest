@@ -740,6 +740,13 @@ namespace SeaNest.Commands
         /// Algorithm picker. Defaults to BLF on Enter to preserve Phase 1 behavior.
         /// </summary>
         internal static bool PromptForAlgorithm(out NestingAlgorithm algorithm)
+            => PromptForAlgorithm(DefaultAlgorithm, out algorithm);
+
+        /// <summary>
+        /// Algorithm picker with caller-supplied default. ReNest uses
+        /// <see cref="NestingAlgorithm.NFP_Annealed"/>; Nest uses BLF.
+        /// </summary>
+        internal static bool PromptForAlgorithm(NestingAlgorithm defaultAlgorithm, out NestingAlgorithm algorithm)
         {
             var go = new GetOption();
             go.SetCommandPrompt("Algorithm");
@@ -749,8 +756,8 @@ namespace SeaNest.Commands
             go.AcceptNothing(true);
             var res = go.Get();
 
-            if (res == GetResult.Nothing) { algorithm = DefaultAlgorithm; return true; }
-            if (res != GetResult.Option) { algorithm = DefaultAlgorithm; return false; }
+            if (res == GetResult.Nothing) { algorithm = defaultAlgorithm; return true; }
+            if (res != GetResult.Option) { algorithm = defaultAlgorithm; return false; }
 
             int sel = go.Option().Index;
             if (sel == idxGreedy) algorithm = NestingAlgorithm.NFP_Greedy;
