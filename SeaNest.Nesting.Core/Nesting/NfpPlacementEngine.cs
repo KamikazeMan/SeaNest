@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Clipper2Lib;
 using SeaNest.Nesting.Core.Geometry;
 using SeaNest.Nesting.Core.Overlap;
@@ -113,6 +114,13 @@ namespace SeaNest.Nesting.Core.Nesting
         private const double OverlapTolerance = 1e-4;
 
         private const int MaxCandidateVerticesPerOrientation = 96;
+
+        // Phase 22b — exact-demand parallel NFP gathering.
+        // Below this count, Parallel.For overhead can cost more than it saves.
+        private const int ParallelNfpPlacedThreshold = 3;
+
+        // Cap worker count so Rhino remains responsive and Clipper/GC pressure stays sane.
+        private const int MaxParallelNfpWorkers = 8;
 
         private const double CandidateDuplicateTolerance = 0.001;
 
@@ -367,6 +375,31 @@ namespace SeaNest.Nesting.Core.Nesting
                 return cached;
             }
 
+            Paths64 allNfps;
+
+            if (sheet.Placed.Count >= ParallelNfpPlacedThreshold)
+            {
+                allNfps = BuildForbiddenRegionParallel(candidate, sheet);
+            }
+            else
+            {
+                allNfps = BuildForbiddenRegionSerial(candidate, sheet);
+            }
+
+            // FillRule.NonZero per codebase precedent (matches Phase 21b shipped behavior).
+            // This phase is a speed patch only; do not change the fill rule.
+            Paths64 union = allNfps.Count == 0
+                ? new Paths64()
+                : Clipper.Union(allNfps, FillRule.NonZero);
+
+            sheet.ForbiddenByOrientation[candidate.OrientationIndex] = union;
+            return union;
+        }
+
+        private Paths64 BuildForbiddenRegionSerial(
+            OrientedPart candidate,
+            SheetState sheet)
+        {
             var allNfps = new Paths64();
 
             foreach (var placed in sheet.Placed)
@@ -380,16 +413,64 @@ namespace SeaNest.Nesting.Core.Nesting
                 }
             }
 
-            // FillRule.NonZero per codebase precedent (OverlapChecker.cs:18-28).
-            // Polygons are not guaranteed CCW; FillRule.Positive would silently
-            // drop CW paths from the union and produce an incomplete forbidden
-            // region.
-            Paths64 union = allNfps.Count == 0
-                ? new Paths64()
-                : Clipper.Union(allNfps, FillRule.NonZero);
+            return allNfps;
+        }
 
-            sheet.ForbiddenByOrientation[candidate.OrientationIndex] = union;
-            return union;
+        private Paths64 BuildForbiddenRegionParallel(
+            OrientedPart candidate,
+            SheetState sheet)
+        {
+            int placedCount = sheet.Placed.Count;
+            var perPlacedPaths = new Paths64[placedCount];
+
+            int maxWorkers = GetMaxNfpParallelism();
+
+            var options = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = maxWorkers
+            };
+
+            Parallel.For(
+                0,
+                placedCount,
+                options,
+                i =>
+                {
+                    var placed = sheet.Placed[i];
+                    var localPaths = new Paths64();
+
+                    var nfp = _nfpCache.Get(placed.Orientation, candidate);
+
+                    foreach (var nfpPoly in nfp)
+                    {
+                        var translated = nfpPoly.Translate(placed.X, placed.Y);
+                        localPaths.Add(ClipperConvert.ToPath64(translated));
+                    }
+
+                    perPlacedPaths[i] = localPaths;
+                });
+
+            // Merge in deterministic placed-order after the parallel work completes.
+            var allNfps = new Paths64();
+
+            for (int i = 0; i < perPlacedPaths.Length; i++)
+            {
+                var local = perPlacedPaths[i];
+                if (local == null || local.Count == 0)
+                    continue;
+
+                for (int p = 0; p < local.Count; p++)
+                    allNfps.Add(local[p]);
+            }
+
+            return allNfps;
+        }
+
+        private static int GetMaxNfpParallelism()
+        {
+            int cpu = Environment.ProcessorCount;
+            int workers = Math.Max(1, cpu - 1);
+            return Math.Min(MaxParallelNfpWorkers, workers);
         }
 
         private Paths64 ComputeFeasibleRegion(BoundingBox2D ifp, Paths64 forbidden)

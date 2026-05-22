@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Clipper2Lib;
 using SeaNest.Nesting.Core.Geometry;
 using SeaNest.Nesting.Core.Overlap;
@@ -70,17 +71,29 @@ namespace SeaNest.Nesting.Core.Nesting
         /// Both buckets count toward the same total because they share the
         /// "reverse a CW that isn't a real hole" semantics.
         /// </summary>
-        public static int SliverReversalsTotal { get; private set; }
+        // Phase 22b: counters are mutated from multiple worker threads via
+        // Parallel.For in NfpPlacementEngine.BuildForbiddenRegionParallel.
+        // Interlocked increments + Volatile reads keep them race-free without
+        // a lock on the hot path.
+        private static int _sliverReversalsTotal;
+        private static int _holesPreservedTotal;
+        private static int _anomalyReversalsTotal;
+
+        public static int SliverReversalsTotal => Volatile.Read(ref _sliverReversalsTotal);
 
         /// <summary>Number of CW paths kept as-is because they encode legitimate holes.</summary>
-        public static int HolesPreservedTotal { get; private set; }
+        public static int HolesPreservedTotal => Volatile.Read(ref _holesPreservedTotal);
 
         /// <summary>
         /// Number of CW paths that had at least one vertex outside the outer envelope
         /// — pathological for well-formed Minkowski outputs. Reversed defensively;
         /// per-anomaly detail emitted to <see cref="AnomalyLog"/>.
         /// </summary>
-        public static int AnomalyReversalsTotal { get; private set; }
+        public static int AnomalyReversalsTotal => Volatile.Read(ref _anomalyReversalsTotal);
+
+        // Phase 22b: serialize log emission so concurrent worker threads don't
+        // interleave half-lines on the diagnostic sink.
+        private static readonly object LogLock = new object();
 
         /// <summary>
         /// Optional per-anomaly diagnostic sink. Wired by NestingEngine.NestNFP
@@ -103,9 +116,42 @@ namespace SeaNest.Nesting.Core.Nesting
         /// <summary>Reset all counters. Call once at the start of a nest run.</summary>
         public static void ResetCounters()
         {
-            SliverReversalsTotal = 0;
-            HolesPreservedTotal = 0;
-            AnomalyReversalsTotal = 0;
+            Volatile.Write(ref _sliverReversalsTotal, 0);
+            Volatile.Write(ref _holesPreservedTotal, 0);
+            Volatile.Write(ref _anomalyReversalsTotal, 0);
+        }
+
+        private static void IncrementSliverReversals()
+        {
+            Interlocked.Increment(ref _sliverReversalsTotal);
+        }
+
+        private static void IncrementHolesPreserved()
+        {
+            Interlocked.Increment(ref _holesPreservedTotal);
+        }
+
+        private static void IncrementAnomalyReversals()
+        {
+            Interlocked.Increment(ref _anomalyReversalsTotal);
+        }
+
+        private static void EmitAnomalyLog(string message)
+        {
+            var sink = AnomalyLog;
+            if (sink == null) return;
+
+            lock (LogLock)
+                sink(message);
+        }
+
+        private static void EmitComputeLog(string message)
+        {
+            var sink = ComputeLog;
+            if (sink == null) return;
+
+            lock (LogLock)
+                sink(message);
         }
 
         /// <summary>
@@ -248,7 +294,7 @@ namespace SeaNest.Nesting.Core.Nesting
                     long ms = computeSw.ElapsedMilliseconds;
                     if (ms >= 50 || a.Count >= 100 || b.Count >= 100)
                     {
-                        ComputeLog.Invoke(
+                        EmitComputeLog(
                             $"  NFP compute: src-orient={srcOrientationIndex} cand-orient={candOrientationIndex}, " +
                             $"a.verts={a.Count}, b.verts={b.Count}, spacing={spacing:G6}, elapsed={ms}ms");
                     }
@@ -292,7 +338,7 @@ namespace SeaNest.Nesting.Core.Nesting
                     if (Clipper.Area(unioned[i]) < 0)
                     {
                         unioned[i].Reverse();
-                        SliverReversalsTotal++;
+                        IncrementSliverReversals();
                     }
                 }
                 return;
@@ -314,7 +360,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 if (absArea < noiseThreshold)
                 {
                     unioned[i].Reverse();
-                    SliverReversalsTotal++;
+                    IncrementSliverReversals();
                     continue;
                 }
 
@@ -332,13 +378,13 @@ namespace SeaNest.Nesting.Core.Nesting
 
                 if (allInside)
                 {
-                    HolesPreservedTotal++;
+                    IncrementHolesPreserved();
                     // Keep CW; FillRule.Positive will subtract it from the union downstream.
                 }
                 else
                 {
-                    AnomalyReversalsTotal++;
-                    AnomalyLog?.Invoke(
+                    IncrementAnomalyReversals();
+                    EmitAnomalyLog(
                         $"  NFP anomaly: src-orient={srcOrientationIndex} cand-orient={candOrientationIndex}, " +
                         $"CW path (verts={cw.Count}, area={absArea:G6}) had vertex outside outer envelope; " +
                         $"reversed defensively.");
@@ -363,7 +409,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 if (Clipper.Area(unioned[i]) < 0)
                 {
                     unioned[i].Reverse();
-                    SliverReversalsTotal++;
+                    IncrementSliverReversals();
                 }
             }
         }
