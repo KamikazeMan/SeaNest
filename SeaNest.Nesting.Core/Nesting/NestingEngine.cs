@@ -237,13 +237,14 @@ namespace SeaNest.Nesting.Core.Nesting
         // ==================================================================
 
         private const double ShelfPackHeadroomFraction = 0.70;
+        private const double ShelfPackMaxBandDepthFraction = 0.55;
 
         private static readonly string ShelfPackOutputPath =
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
                 "phase24b_shelfpack.txt");
 
-        private enum ShelfSide { Top, Bottom, Left, Right }
+        private enum ShelfSide { Top, Bottom }
 
         private NfpPlacementEngine.NestResult TrySingleSheetShelfPack(
             NfpPlacementEngine.NestResult originalResult,
@@ -318,7 +319,7 @@ namespace SeaNest.Nesting.Core.Nesting
             });
 
             // Try each strategy.
-            var strategies = new[] { ShelfSide.Top, ShelfSide.Bottom, ShelfSide.Left, ShelfSide.Right };
+            var strategies = new[] { ShelfSide.Top, ShelfSide.Bottom };
             NfpPlacementEngine.NestResult bestResult = null;
 
             foreach (var side in strategies)
@@ -360,7 +361,7 @@ namespace SeaNest.Nesting.Core.Nesting
             log.Add($"Phase 24b: all strategies failed, keeping original {originalResult.SheetCount}-sheet layout ({sw.ElapsedMilliseconds}ms).");
             WriteShelfPackLog(log);
             DiagnosticCallback?.Invoke(
-                $"Phase 24b shelf-pack failed (all 4 strategies), keeping original layout — " +
+                $"Phase 24b shelf-pack failed (all strategies), keeping original layout — " +
                 $"see Desktop\\phase24b_shelfpack.txt");
             return originalResult;
         }
@@ -377,14 +378,19 @@ namespace SeaNest.Nesting.Core.Nesting
             List<int> tinyIndices,
             List<string> log)
         {
-            bool horizontal = (side == ShelfSide.Top || side == ShelfSide.Bottom);
-            double shelfLength = horizontal ? request.UsableWidth : request.UsableHeight;
+            double shelfLength = request.UsableWidth;
+            double perpDimension = request.UsableHeight;
             double spacing = request.Spacing;
+            double maxBandDepth = ShelfPackMaxBandDepthFraction * perpDimension;
 
-            // Compute shelf depth and strip positions.
-            double shelfDepth = 0;
+            // Phase 24b.2: multi-row first-fit-decreasing shelf packing.
+            // Each row tracks its cursor (along shelf direction) and height
+            // (max perpendicular extent of parts in that row).
+            var rows = new List<(double cursor, double height, List<int> parts)>();
             var stripPositions = new List<(int partIndex, double x, double y, double rotDeg)>();
-            double cursor = request.Margin;
+
+            // Temporary per-part data for position computation after row layout.
+            var partRowAssignment = new List<(int partIndex, int rowIdx, double cursorAtPlace, double longSide, double shortSide, double rotDeg)>();
 
             for (int i = 0; i < majorIndices.Count; i++)
             {
@@ -392,73 +398,103 @@ namespace SeaNest.Nesting.Core.Nesting
                 var bbox = nfpPolygons[idx].BoundingBox;
                 double longSide = Math.Max(bbox.Width, bbox.Height);
                 double shortSide = Math.Min(bbox.Width, bbox.Height);
-                bool needsRotate = (horizontal && bbox.Height > bbox.Width) ||
-                                   (!horizontal && bbox.Width > bbox.Height);
+                bool needsRotate = bbox.Height > bbox.Width;
                 double rotDeg = needsRotate ? 90.0 : 0.0;
-                double partExtentAlongShelf = horizontal ? longSide : longSide;
-                double partExtentPerpendicular = horizontal ? shortSide : shortSide;
 
-                if (cursor + partExtentAlongShelf > shelfLength + request.Margin + 0.01)
+                // First-fit into existing rows.
+                bool placed = false;
+                for (int r = 0; r < rows.Count; r++)
                 {
-                    log.Add($"  StripMajor part {idx} ({longSide:F1}x{shortSide:F1}) overflows shelf at cursor={cursor:F1}, shelfLength={shelfLength:F1}.");
-                    return null;
+                    var row = rows[r];
+                    if (row.cursor + longSide <= shelfLength + request.Margin + 0.01)
+                    {
+                        partRowAssignment.Add((idx, r, row.cursor, longSide, shortSide, rotDeg));
+                        row.parts.Add(idx);
+                        rows[r] = (row.cursor + longSide + spacing,
+                                   Math.Max(row.height, shortSide),
+                                   row.parts);
+                        placed = true;
+                        break;
+                    }
                 }
 
-                shelfDepth = Math.Max(shelfDepth, partExtentPerpendicular);
-
-                double px, py;
-                switch (side)
+                if (!placed)
                 {
-                    case ShelfSide.Top:
-                        px = cursor;
-                        py = request.SheetHeight - request.Margin - partExtentPerpendicular;
-                        break;
-                    case ShelfSide.Bottom:
-                        px = cursor;
-                        py = request.Margin;
-                        break;
-                    case ShelfSide.Left:
-                        px = request.Margin;
-                        py = cursor;
-                        break;
-                    default: // Right
-                        px = request.SheetWidth - request.Margin - partExtentPerpendicular;
-                        py = cursor;
-                        break;
-                }
+                    // Compute candidate band depth if we add this row.
+                    double depthSoFar = 0;
+                    for (int r = 0; r < rows.Count; r++)
+                        depthSoFar += rows[r].height;
+                    depthSoFar += rows.Count * spacing;
+                    double candidateDepth = depthSoFar + shortSide;
 
-                stripPositions.Add((idx, px, py, rotDeg));
-                cursor += partExtentAlongShelf + spacing;
+                    if (candidateDepth > maxBandDepth)
+                    {
+                        log.Add($"  StripMajor part {idx} ({longSide:F1}x{shortSide:F1}) would push band depth to {candidateDepth:F1} > cap {maxBandDepth:F1}.");
+                        return null;
+                    }
+
+                    int newRowIdx = rows.Count;
+                    var newParts = new List<int> { idx };
+                    rows.Add((request.Margin + longSide + spacing, shortSide, newParts));
+                    partRowAssignment.Add((idx, newRowIdx, request.Margin, longSide, shortSide, rotDeg));
+                }
             }
 
+            // Compute total shelf depth.
+            double shelfDepth = 0;
+            for (int r = 0; r < rows.Count; r++)
+            {
+                shelfDepth += rows[r].height;
+                if (r > 0) shelfDepth += spacing;
+            }
             shelfDepth += spacing;
-            log.Add($"  Shelf depth: {shelfDepth:F2}, {stripPositions.Count} StripMajor parts placed.");
+
+            // Compute per-row Y start positions based on shelf side.
+            var rowStartY = new double[rows.Count];
+            if (side == ShelfSide.Top)
+            {
+                double y = request.SheetHeight - request.Margin;
+                for (int r = 0; r < rows.Count; r++)
+                {
+                    y -= rows[r].height;
+                    rowStartY[r] = y;
+                    y -= spacing;
+                }
+            }
+            else // Bottom
+            {
+                double y = request.Margin;
+                for (int r = 0; r < rows.Count; r++)
+                {
+                    rowStartY[r] = y;
+                    y += rows[r].height + spacing;
+                }
+            }
+
+            // Build final strip positions.
+            foreach (var (partIndex, rowIdx, cursorAtPlace, longSide, shortSide, rotDeg) in partRowAssignment)
+            {
+                double px = cursorAtPlace;
+                double py = rowStartY[rowIdx];
+                stripPositions.Add((partIndex, px, py, rotDeg));
+            }
+
+            // Diagnostic: per-row summary.
+            for (int r = 0; r < rows.Count; r++)
+            {
+                var row = rows[r];
+                string partList = string.Join(", ", row.parts);
+                log.Add($"  Row {r} at y={rowStartY[r]:F1}: parts [{partList}] (height {row.height:F1})");
+            }
+            log.Add($"  Shelf: {rows.Count} rows, total depth {shelfDepth:F2}, {stripPositions.Count} StripMajor parts placed.");
 
             // Build reduced-sheet NestRequest for Irregulars.
-            double reducedW, reducedH;
+            double reducedW = request.SheetWidth;
+            double reducedH = request.SheetHeight - shelfDepth;
             double irregOffsetX = 0, irregOffsetY = 0;
 
-            switch (side)
-            {
-                case ShelfSide.Top:
-                    reducedW = request.SheetWidth;
-                    reducedH = request.SheetHeight - shelfDepth;
-                    break;
-                case ShelfSide.Bottom:
-                    reducedW = request.SheetWidth;
-                    reducedH = request.SheetHeight - shelfDepth;
-                    irregOffsetY = shelfDepth;
-                    break;
-                case ShelfSide.Left:
-                    reducedW = request.SheetWidth - shelfDepth;
-                    reducedH = request.SheetHeight;
-                    irregOffsetX = shelfDepth;
-                    break;
-                default: // Right
-                    reducedW = request.SheetWidth - shelfDepth;
-                    reducedH = request.SheetHeight;
-                    break;
-            }
+            if (side == ShelfSide.Bottom)
+                irregOffsetY = shelfDepth;
 
             if (reducedW <= 2 * request.Margin || reducedH <= 2 * request.Margin)
             {
