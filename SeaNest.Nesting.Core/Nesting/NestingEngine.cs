@@ -54,6 +54,12 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         public Action<string> DiagnosticCallback { get; set; }
 
+        /// <summary>
+        /// Phase 23: optional time budget for last-sheet evacuation after SA
+        /// converges. Null = evacuation disabled. NFP_Annealed only.
+        /// </summary>
+        public TimeSpan? EvacuationTimeBudget { get; set; }
+
         public NestResponse Nest(NestRequest request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
@@ -128,7 +134,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             try
             {
-                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache, nfpPolygons);
+                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache, nfpPolygons, orientationsByPart);
             }
             finally
             {
@@ -143,7 +149,8 @@ namespace SeaNest.Nesting.Core.Nesting
             bool useAnnealing,
             NfpPlacementEngine engine,
             NfpCache cache,
-            IReadOnlyList<Polygon> nfpPolygons)
+            IReadOnlyList<Polygon> nfpPolygons,
+            IReadOnlyList<List<OrientedPart>> orientationsByPart)
         {
             // Step 4: Place parts.
             NfpPlacementEngine.NestResult result;
@@ -176,6 +183,13 @@ namespace SeaNest.Nesting.Core.Nesting
                 ProgressCallback?.Invoke(0.15, "Placing parts...");
                 result = engine.PlaceAll(initialOrder);
                 ProgressCallback?.Invoke(0.95, "Finalizing...");
+            }
+
+            // Phase 23: last-sheet evacuation pass (NFP_Annealed only).
+            if (useAnnealing && EvacuationTimeBudget.HasValue && result.SheetCount >= 2)
+            {
+                result = TryEvacuateLastSheet(
+                    result, request, orientationsByPart, cache);
             }
 
             // Step 5: Sort placements by original index for stable downstream rendering.
@@ -214,6 +228,125 @@ namespace SeaNest.Nesting.Core.Nesting
                 totalPlacedArea,
                 usablePerSheet,
                 stopwatch.Elapsed);
+        }
+
+        // ==================================================================
+        // Phase 23: last-sheet evacuation
+        // ==================================================================
+
+        private NfpPlacementEngine.NestResult TryEvacuateLastSheet(
+            NfpPlacementEngine.NestResult originalResult,
+            NestRequest request,
+            IReadOnlyList<List<OrientedPart>> orientationsByPart,
+            NfpCache cache)
+        {
+            int sheetCount = originalResult.SheetCount;
+            if (sheetCount < 2) return originalResult;
+
+            var budget = EvacuationTimeBudget.Value;
+            var sw = Stopwatch.StartNew();
+
+            double usableArea = request.UsableWidth * request.UsableHeight;
+
+            // Find the lowest-utilization sheet.
+            var sheetArea = new double[sheetCount];
+            var sheetPartCount = new int[sheetCount];
+            foreach (var p in originalResult.Placements)
+            {
+                sheetArea[p.Sheet] += p.PlacedPolygon.AbsoluteArea;
+                sheetPartCount[p.Sheet]++;
+            }
+
+            int targetSheet = 0;
+            double lowestUtil = double.MaxValue;
+            for (int s = 0; s < sheetCount; s++)
+            {
+                double util = usableArea > 0 ? sheetArea[s] / usableArea : 0;
+                if (util < lowestUtil)
+                {
+                    lowestUtil = util;
+                    targetSheet = s;
+                }
+            }
+
+            DiagnosticCallback?.Invoke(
+                $"Phase 23: starting evacuation pass on sheet {targetSheet} " +
+                $"(utilization {lowestUtil * 100.0:F1}%, {sheetPartCount[targetSheet]} parts), " +
+                $"budget {budget.TotalSeconds:F0}s");
+
+            // Collect parts on the target sheet, sorted smallest-area first.
+            var targetParts = new List<PlacementResult>();
+            var keptPlacements = new List<PlacementResult>();
+            foreach (var p in originalResult.Placements)
+            {
+                if (p.Sheet == targetSheet)
+                    targetParts.Add(p);
+                else
+                    keptPlacements.Add(p);
+            }
+            targetParts.Sort((a, b) =>
+                a.PlacedPolygon.AbsoluteArea.CompareTo(b.PlacedPolygon.AbsoluteArea));
+
+            // Build an evacuation engine with extended candidate exploration.
+            var evacEngine = new NfpPlacementEngine(request, orientationsByPart, cache)
+            {
+                DiagnosticLog = DiagnosticCallback,
+                MaxCandidateVertices = 512
+            };
+
+            // Try to re-place each target-sheet part onto sheets 0..N-2
+            // (excluding the target sheet). We build a fresh placement order
+            // containing ONLY the target-sheet parts, and run PlaceAll on an
+            // engine whose "existing" sheets are pre-seeded from keptPlacements.
+            //
+            // Since PlaceAll starts from empty sheets, we can't directly use it
+            // to place onto existing sheets. Instead, attempt placement per-part
+            // using the engine's TryPlaceOnSheet-equivalent by running PlaceAll
+            // with the kept parts first (to fill the sheets), then the target
+            // parts. The kept parts will re-place identically (same NFPs, same
+            // cache), and the target parts will try to fit in remaining space.
+            //
+            // Simpler approach: build a combined order with kept parts first
+            // (in their original order), then target parts. The kept parts
+            // will place on their original sheets (same geometry), and target
+            // parts will try to fill gaps.
+
+            // Build the combined placement order: kept parts first (by their
+            // original position in the SA result), then target parts.
+            var combinedOrder = new List<int>();
+            foreach (var p in keptPlacements)
+                combinedOrder.Add(p.OriginalIndex);
+            foreach (var p in targetParts)
+                combinedOrder.Add(p.OriginalIndex);
+
+            var evacResult = evacEngine.PlaceAll(combinedOrder);
+
+            sw.Stop();
+
+            // Check: did all parts place AND did sheet count decrease?
+            if (evacResult.Unplaced.Count > originalResult.Unplaced.Count)
+            {
+                DiagnosticCallback?.Invoke(
+                    $"Phase 23: evacuation failed — {evacResult.Unplaced.Count} unplaced " +
+                    $"(was {originalResult.Unplaced.Count}), keeping original layout. " +
+                    $"Elapsed {sw.ElapsedMilliseconds}ms.");
+                return originalResult;
+            }
+
+            if (evacResult.SheetCount >= sheetCount)
+            {
+                DiagnosticCallback?.Invoke(
+                    $"Phase 23: evacuation did not reduce sheet count " +
+                    $"({evacResult.SheetCount} sheets, was {sheetCount}), " +
+                    $"keeping original layout. Elapsed {sw.ElapsedMilliseconds}ms.");
+                return originalResult;
+            }
+
+            DiagnosticCallback?.Invoke(
+                $"Phase 23: evacuation succeeded — sheet count {sheetCount} -> {evacResult.SheetCount}. " +
+                $"Elapsed {sw.ElapsedMilliseconds}ms.");
+
+            return evacResult;
         }
 
         /// <summary>
