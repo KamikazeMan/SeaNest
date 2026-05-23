@@ -136,7 +136,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             try
             {
-                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache, nfpPolygons);
+                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache, nfpPolygons, orientationsByPart);
             }
             finally
             {
@@ -151,7 +151,8 @@ namespace SeaNest.Nesting.Core.Nesting
             bool useAnnealing,
             NfpPlacementEngine engine,
             NfpCache cache,
-            IReadOnlyList<Polygon> nfpPolygons)
+            IReadOnlyList<Polygon> nfpPolygons,
+            IReadOnlyList<List<OrientedPart>> orientationsByPart)
         {
             // Step 4: Place parts.
             NfpPlacementEngine.NestResult result;

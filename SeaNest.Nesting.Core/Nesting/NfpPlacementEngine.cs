@@ -205,7 +205,9 @@ namespace SeaNest.Nesting.Core.Nesting
 
         private const double OverlapTolerance = 1e-4;
 
-        private const int MaxCandidateVerticesPerOrientation = 96;
+        private const int DefaultMaxCandidateVertices = 96;
+
+        public int MaxCandidateVertices { get; set; } = DefaultMaxCandidateVertices;
 
         // Phase 22b — exact-demand parallel NFP gathering.
         // Below this count, Parallel.For overhead can cost more than it saves.
@@ -312,7 +314,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 sw.Restart();
                 var candidates = FindCandidateVertices(
                     feasible,
-                    MaxCandidateVerticesPerOrientation);
+                    MaxCandidateVertices);
                 sw.Stop();
                 tCandidateSweep += sw.ElapsedMilliseconds;
 
