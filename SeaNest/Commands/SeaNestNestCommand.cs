@@ -90,6 +90,7 @@ namespace SeaNest.Commands
             NestingAlgorithm algorithm;
             bool allowMirror;
             double timeBudgetSeconds;
+            int randomSeed = 0;
 
             if (!PromptForDouble(doc, "Sheet width", DefaultSheetWidthIn * inToModel, out sheetW)) return Rhino.Commands.Result.Cancel;
             if (!PromptForDouble(doc, "Sheet height", DefaultSheetHeightIn * inToModel, out sheetH)) return Rhino.Commands.Result.Cancel;
@@ -120,6 +121,15 @@ namespace SeaNest.Commands
                         RhinoApp.WriteLine("Time budget must be positive.");
                         return Rhino.Commands.Result.Cancel;
                     }
+
+                    var gi = new Rhino.Input.Custom.GetInteger();
+                    gi.SetCommandPrompt("Random seed (0=deterministic)");
+                    gi.SetDefaultInteger(0);
+                    gi.AcceptNothing(true);
+                    var giRes = gi.Get();
+                    if (giRes == GetResult.Nothing) randomSeed = 0;
+                    else if (giRes == GetResult.Number) randomSeed = (int)gi.Number();
+                    else return Rhino.Commands.Result.Cancel;
                 }
                 else
                 {
@@ -413,7 +423,8 @@ namespace SeaNest.Commands
                         dialog.UpdateStatus(msg);
                         Application.Instance.RunIteration();
                     },
-                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg)
+                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg),
+                    RandomSeed = randomSeed
                 };
                 response = engine.Nest(request);
             }

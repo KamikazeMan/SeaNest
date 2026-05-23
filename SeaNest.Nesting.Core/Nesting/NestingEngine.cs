@@ -54,6 +54,13 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         public Action<string> DiagnosticCallback { get; set; }
 
+        /// <summary>
+        /// Phase 25: SA random seed. Default null = use 0 (deterministic,
+        /// same parts → same layout). Set to a non-zero value to explore
+        /// different SA trajectories without recompiling.
+        /// </summary>
+        public int? RandomSeed { get; set; }
+
         public NestResponse Nest(NestRequest request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
@@ -164,11 +171,14 @@ namespace SeaNest.Nesting.Core.Nesting
                     ? (Action<double, string>)null
                     : (frac, status) => ProgressCallback(0.15 + frac * 0.80, status);
 
+                int seed = RandomSeed ?? 0;
+                DiagnosticCallback?.Invoke($"NFP_Annealed: SA random seed = {seed}");
+
                 result = SimulatedAnnealing.Optimize(
                     engine,
                     initialOrder,
                     request.TimeBudget,
-                    randomSeed: 0,
+                    randomSeed: seed,
                     progressCallback: saProgress);
             }
             else
