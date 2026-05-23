@@ -466,12 +466,16 @@ namespace SeaNest.Nesting.Core.Nesting
             }
 
             // Place Irregulars on the reduced sheet.
+            // Reuse orientationsByPart entries rather than rebuilding.
             var irregPolygons = new List<Polygon>();
+            var irregOrientations = new List<List<OrientedPart>>();
             var irregIndexMap = new Dictionary<int, int>();
             for (int i = 0; i < irregularIndices.Count; i++)
             {
-                irregPolygons.Add(nfpPolygons[irregularIndices[i]]);
-                irregIndexMap[i] = irregularIndices[i];
+                int origIdx = irregularIndices[i];
+                irregPolygons.Add(nfpPolygons[origIdx]);
+                irregOrientations.Add(orientationsByPart[origIdx]);
+                irregIndexMap[i] = origIdx;
             }
 
             NestRequest reducedRequest;
@@ -480,7 +484,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 reducedRequest = new NestRequest(
                     irregPolygons, reducedW, reducedH,
                     request.SheetThickness, request.Margin, request.Spacing,
-                    request.RotationStep, request.Algorithm, request.AllowMirror,
+                    request.RotationStep, NestingAlgorithm.NFP_Greedy, request.AllowMirror,
                     request.TimeBudget);
             }
             catch
@@ -489,12 +493,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 return null;
             }
 
-            OrientedPart.BuildAll(
-                irregPolygons, request.RotationStepDegrees, request.AllowMirror,
-                out _, out var irregOrientations);
-
-            var irregCache = new NfpCache(request.Spacing);
-            var irregEngine = new NfpPlacementEngine(reducedRequest, irregOrientations, irregCache)
+            var irregEngine = new NfpPlacementEngine(reducedRequest, irregOrientations, cache)
             {
                 DiagnosticLog = null,
                 MaxCandidateVertices = 512
@@ -513,6 +512,17 @@ namespace SeaNest.Nesting.Core.Nesting
 
             // Composite all placements into a single sheet.
             var allPlacements = new List<PlacementResult>();
+
+            // Build OrientedParts for the StripMajor shelf placements so the
+            // gap-fill engine can compute NFPs against them. Assign orientation
+            // indices past all existing indices to avoid collisions.
+            int nextOrientIdx = 0;
+            foreach (var perPart in orientationsByPart)
+                foreach (var op in perPart)
+                    if (op.OrientationIndex >= nextOrientIdx)
+                        nextOrientIdx = op.OrientationIndex + 1;
+
+            var preplacedList = new List<NfpPlacementEngine.PreplacedPart>();
 
             // StripMajor placements (deterministic).
             foreach (var (partIndex, px, py, rotDeg) in stripPositions)
@@ -534,7 +544,10 @@ namespace SeaNest.Nesting.Core.Nesting
 
                 var placedPoly = rotatedNormalized.Translate(px, py);
 
-                allPlacements.Add(new PlacementResult(
+                var shelfOrientation = OrientedPart.Build(
+                    nextOrientIdx++, partIndex, sourcePoly, rotDeg, isMirrored: false);
+
+                var placement = new PlacementResult(
                     originalIndex: partIndex,
                     sheet: 0,
                     transform: combined,
@@ -542,24 +555,38 @@ namespace SeaNest.Nesting.Core.Nesting
                     isMirrored: false,
                     sourceBBoxMinX: srcBBox.MinX,
                     sourceBBoxMaxX: srcBBox.MaxX,
-                    placedPolygon: placedPoly));
+                    placedPolygon: placedPoly);
+
+                allPlacements.Add(placement);
+                preplacedList.Add(new NfpPlacementEngine.PreplacedPart(
+                    partIndex, 0, shelfOrientation, px, py, placement));
             }
 
             // Irregular placements (offset from reduced sheet to full sheet).
             foreach (var pp in irregResult.Placements)
             {
                 int originalIdx = irregIndexMap[pp.OriginalIndex];
-                var sourcePoly = nfpPolygons[originalIdx];
-                var srcBBox = sourcePoly.BoundingBox;
-
                 double offsetX = irregOffsetX;
                 double offsetY = irregOffsetY;
 
                 var placedPoly = pp.PlacedPolygon.Translate(offsetX, offsetY);
-
                 var offsetTransform = pp.Transform.Then(Transform2D.Translation(offsetX, offsetY));
 
-                allPlacements.Add(new PlacementResult(
+                var sourcePoly = nfpPolygons[originalIdx];
+                var srcBBox = sourcePoly.BoundingBox;
+
+                // Build an OrientedPart for this placed irregular. Use the same
+                // rotation/mirror as the engine chose, with a fresh index.
+                var irregOrientation = OrientedPart.Build(
+                    nextOrientIdx++, originalIdx, sourcePoly,
+                    pp.RotationDeg, pp.IsMirrored);
+
+                // Compute the placed position in the full sheet's coordinate space.
+                var irregCanonBBox = irregOrientation.CanonicalPolygon.BoundingBox;
+                double placedX = placedPoly.BoundingBox.MinX - irregCanonBBox.MinX;
+                double placedY = placedPoly.BoundingBox.MinY - irregCanonBBox.MinY;
+
+                var placement = new PlacementResult(
                     originalIndex: originalIdx,
                     sheet: 0,
                     transform: offsetTransform,
@@ -567,41 +594,27 @@ namespace SeaNest.Nesting.Core.Nesting
                     isMirrored: pp.IsMirrored,
                     sourceBBoxMinX: srcBBox.MinX,
                     sourceBBoxMaxX: srcBBox.MaxX,
-                    placedPolygon: placedPoly));
+                    placedPolygon: placedPoly);
+
+                allPlacements.Add(placement);
+                preplacedList.Add(new NfpPlacementEngine.PreplacedPart(
+                    originalIdx, 0, irregOrientation, placedX, placedY, placement));
             }
 
-            // Now place StripMinor + Tiny into the full sheet with all parts
-            // already placed. Build a fresh engine on the full sheet.
+            // Gap-fill: place StripMinor + Tiny using PlaceAllWithPreplaced.
             var gapFillIndices = new List<int>();
             gapFillIndices.AddRange(minorIndices);
             gapFillIndices.AddRange(tinyIndices);
 
             if (gapFillIndices.Count > 0)
             {
-                var gapPolygons = new List<Polygon>();
-                var gapIndexMap = new Dictionary<int, int>();
-                for (int i = 0; i < gapFillIndices.Count; i++)
-                {
-                    gapPolygons.Add(nfpPolygons[gapFillIndices[i]]);
-                    gapIndexMap[i] = gapFillIndices[i];
-                }
-
-                // Build a combined order: existing placed parts first (to seed
-                // the sheet state), then gap-fill parts.
-                var allPolygons = new List<Polygon>(nfpPolygons);
-                var gapOrder = new List<int>();
-                foreach (var pp in allPlacements)
-                    gapOrder.Add(pp.OriginalIndex);
-                foreach (var gi in gapFillIndices)
-                    gapOrder.Add(gi);
-
                 var gapEngine = new NfpPlacementEngine(request, orientationsByPart, cache)
                 {
                     DiagnosticLog = null,
                     MaxCandidateVertices = 512
                 };
 
-                var gapResult = gapEngine.PlaceAll(gapOrder);
+                var gapResult = gapEngine.PlaceAllWithPreplaced(gapFillIndices, preplacedList);
 
                 if (gapResult.SheetCount > 1 || gapResult.Unplaced.Count > 0)
                 {
@@ -610,9 +623,6 @@ namespace SeaNest.Nesting.Core.Nesting
                 }
 
                 log.Add($"  Gap-fill: all {gapFillIndices.Count} minor/tiny parts placed.");
-
-                // The gapResult contains ALL parts (existing + gap-fill) re-placed
-                // from scratch by the engine. Use this as the final result.
                 return gapResult;
             }
 

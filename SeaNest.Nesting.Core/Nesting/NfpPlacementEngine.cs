@@ -86,6 +86,98 @@ namespace SeaNest.Nesting.Core.Nesting
             return new NestResult(sheets.Count, placements, unplaced);
         }
 
+        public readonly struct PreplacedPart
+        {
+            public int OriginalIndex { get; }
+            public int Sheet { get; }
+            public OrientedPart Orientation { get; }
+            public double X { get; }
+            public double Y { get; }
+            public PlacementResult Placement { get; }
+
+            public PreplacedPart(
+                int originalIndex, int sheet, OrientedPart orientation,
+                double x, double y, PlacementResult placement)
+            {
+                OriginalIndex = originalIndex;
+                Sheet = sheet;
+                Orientation = orientation;
+                X = x;
+                Y = y;
+                Placement = placement;
+            }
+        }
+
+        public NestResult PlaceAllWithPreplaced(
+            IReadOnlyList<int> partOrder,
+            IReadOnlyList<PreplacedPart> preplaced)
+        {
+            if (partOrder == null) throw new ArgumentNullException(nameof(partOrder));
+            if (preplaced == null) throw new ArgumentNullException(nameof(preplaced));
+
+            var sheets = new List<SheetState>();
+            var placements = new List<PlacementResult>();
+            var unplaced = new List<int>();
+
+            // Seed sheet state from pre-placed parts.
+            foreach (var pp in preplaced)
+            {
+                while (sheets.Count <= pp.Sheet)
+                    sheets.Add(new SheetState());
+
+                sheets[pp.Sheet].Placed.Add(
+                    new PlacedItem(pp.Orientation, pp.X, pp.Y));
+
+                placements.Add(pp.Placement);
+            }
+
+            // Clear forbidden-region caches on all seeded sheets so the first
+            // real placement rebuilds them against the full pre-placed state.
+            foreach (var sheet in sheets)
+                sheet.ForbiddenByOrientation.Clear();
+
+            // Now place the new parts normally.
+            foreach (int partIndex in partOrder)
+            {
+                var orientations = _orientationsByPart[partIndex];
+
+                bool placed = false;
+
+                for (int sheetIdx = 0; sheetIdx < sheets.Count && !placed; sheetIdx++)
+                {
+                    placed = TryPlaceOnSheet(
+                        partIndex,
+                        orientations,
+                        sheets[sheetIdx],
+                        sheetIdx,
+                        placements);
+                }
+
+                if (!placed)
+                {
+                    var newSheet = new SheetState();
+                    sheets.Add(newSheet);
+
+                    int newSheetIdx = sheets.Count - 1;
+
+                    placed = TryPlaceOnSheet(
+                        partIndex,
+                        orientations,
+                        newSheet,
+                        newSheetIdx,
+                        placements);
+
+                    if (!placed)
+                    {
+                        sheets.RemoveAt(newSheetIdx);
+                        unplaced.Add(partIndex);
+                    }
+                }
+            }
+
+            return new NestResult(sheets.Count, placements, unplaced);
+        }
+
         public sealed class NestResult
         {
             public int SheetCount { get; }
