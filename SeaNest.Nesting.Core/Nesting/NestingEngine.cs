@@ -58,6 +58,14 @@ namespace SeaNest.Nesting.Core.Nesting
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
 
+            // Phase 24a: classify parts before any placement work. Diagnostic
+            // only — no behavior change. Output goes to a desktop file to
+            // bypass the Rhino F2 500-line cap.
+            if (DiagnosticCallback != null)
+            {
+                PartClassifier.RunDiagnostic(request.Polygons, DiagnosticCallback);
+            }
+
             var stopwatch = Stopwatch.StartNew();
 
             switch (request.Algorithm)
