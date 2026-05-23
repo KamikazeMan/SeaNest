@@ -7,7 +7,8 @@ namespace SeaNest.Nesting.Core.Nesting
 {
     public enum PartClass
     {
-        Strip,
+        StripMajor,
+        StripMinor,
         Irregular,
         Tiny
     }
@@ -20,6 +21,7 @@ namespace SeaNest.Nesting.Core.Nesting
         public const double StripHighAspectMaxConcavity = 0.40;
         public const double HighAspectThreshold = 15.0;
         public const double TinyMaxLongestSide = 2.0;
+        public const double StripMajorMinLongestSide = 50.0;
 
         private const string OutputPath =
             @"C:\Users\David LaChute\Desktop\phase24a_classify.txt";
@@ -48,7 +50,9 @@ namespace SeaNest.Nesting.Core.Nesting
                 shortSide <= StripMaxShortSide &&
                 concavity <= maxConcavity)
             {
-                return PartClass.Strip;
+                if (longSide >= StripMajorMinLongestSide)
+                    return PartClass.StripMajor;
+                return PartClass.StripMinor;
             }
             return PartClass.Irregular;
         }
@@ -60,14 +64,16 @@ namespace SeaNest.Nesting.Core.Nesting
             if (polygons == null || log == null) return;
 
             var lines = new List<string>();
-            lines.Add($"Phase 24a.1 classification run at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            lines.Add($"Phase 24a.2 classification run at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             lines.Add($"Thresholds: aspect>={StripMinAspectRatio}, shortSide<={StripMaxShortSide}\", " +
                        $"baseConcavity<={StripBaseMaxConcavity:P0}, " +
                        $"highAspectConcavity<={StripHighAspectMaxConcavity:P0} (aspect>={HighAspectThreshold}), " +
+                       $"majorLong>={StripMajorMinLongestSide}\", " +
                        $"tiny<={TinyMaxLongestSide}\"");
             lines.Add("");
 
-            int stripCount = 0;
+            int majorCount = 0;
+            int minorCount = 0;
             int irregularCount = 0;
             int tinyCount = 0;
 
@@ -94,18 +100,19 @@ namespace SeaNest.Nesting.Core.Nesting
                     $"concavity={concavity:P1}, " +
                     $"verts={poly.Count}");
 
-                if (cls == PartClass.Strip) stripCount++;
+                if (cls == PartClass.StripMajor) majorCount++;
+                else if (cls == PartClass.StripMinor) minorCount++;
                 else if (cls == PartClass.Tiny) tinyCount++;
                 else irregularCount++;
             }
 
             lines.Add("");
-            lines.Add($"Phase 24a aggregate: {stripCount} strips, {irregularCount} irregulars, {tinyCount} tiny out of {polygons.Count} parts.");
+            lines.Add($"Phase 24a aggregate: {majorCount} major-strips, {minorCount} minor-strips, {irregularCount} irregulars, {tinyCount} tiny out of {polygons.Count} parts.");
 
             try
             {
                 File.WriteAllLines(OutputPath, lines);
-                log($"Phase 24a classification complete — see Desktop\\phase24a_classify.txt ({stripCount} strips, {irregularCount} irregulars, {tinyCount} tiny)");
+                log($"Phase 24a classification complete — see Desktop\\phase24a_classify.txt ({majorCount} major, {minorCount} minor, {irregularCount} irregular, {tinyCount} tiny)");
             }
             catch (Exception ex)
             {
