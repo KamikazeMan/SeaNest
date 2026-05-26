@@ -60,11 +60,29 @@ namespace SeaNest.Nesting.Core.Nesting
             var stopwatch = Stopwatch.StartNew();
             var lastProgress = Stopwatch.StartNew();
 
+            // Phase 25.1: if user supplied a non-zero seed, randomize the
+            // initial order via Fisher-Yates. This ensures the warm start,
+            // the deterministic seed orders (which derive FROM the initial
+            // order), and the annealing mutations all diverge by seed.
+            // Seed 0 stays deterministic (largest-first) for production
+            // reproducibility.
+            var workingInitialOrder = new List<int>(initialOrder);
+            if (randomSeed != 0)
+            {
+                for (int i = workingInitialOrder.Count - 1; i > 0; i--)
+                {
+                    int j = random.Next(i + 1);
+                    int tmp = workingInitialOrder[i];
+                    workingInitialOrder[i] = workingInitialOrder[j];
+                    workingInitialOrder[j] = tmp;
+                }
+            }
+
             // ------------------------------------------------------------------
             // 1. Warm start
             // ------------------------------------------------------------------
 
-            var currentOrder = new List<int>(initialOrder);
+            var currentOrder = new List<int>(workingInitialOrder);
             var currentResult = engine.PlaceAll(currentOrder);
             var currentScore = ScoreResult(currentResult);
 
@@ -83,7 +101,7 @@ namespace SeaNest.Nesting.Core.Nesting
             // begins. They are cheap and deterministic.
             // ------------------------------------------------------------------
 
-            var seedOrders = BuildSeedOrders(initialOrder);
+            var seedOrders = BuildSeedOrders(workingInitialOrder);
 
             int iteration = 0;
 
@@ -178,7 +196,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 // basin of solutions without losing the best result.
                 if (iteration % 60 == 0)
                 {
-                    currentOrder = new List<int>(initialOrder);
+                    currentOrder = new List<int>(workingInitialOrder);
                     ApplyKickMutation(currentOrder, random);
                     currentResult = engine.PlaceAll(currentOrder);
                     currentScore = ScoreResult(currentResult);
