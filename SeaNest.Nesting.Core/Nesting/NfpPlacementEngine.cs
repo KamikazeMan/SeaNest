@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using Clipper2Lib;
 using SeaNest.Nesting.Core.Geometry;
@@ -30,6 +31,13 @@ namespace SeaNest.Nesting.Core.Nesting
         public bool EnableInteriorSampling { get; set; } = false;
         public double? InteriorSamplingStep { get; set; } = null;
 
+        private static readonly string InteriorFallbackLogPath =
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                "phase26_interior.txt");
+
+        private static readonly List<string> InteriorFallbackLog = new List<string>();
+
         public NfpPlacementEngine(
             NestRequest request,
             IReadOnlyList<List<OrientedPart>> orientationsByPart,
@@ -43,6 +51,8 @@ namespace SeaNest.Nesting.Core.Nesting
         public NestResult PlaceAll(IReadOnlyList<int> partOrder)
         {
             if (partOrder == null) throw new ArgumentNullException(nameof(partOrder));
+
+            InteriorFallbackLog.Clear();
 
             var sheets = new List<SheetState>();
             var placements = new List<PlacementResult>();
@@ -85,6 +95,8 @@ namespace SeaNest.Nesting.Core.Nesting
                     }
                 }
             }
+
+            FlushInteriorFallbackLog();
 
             return new NestResult(sheets.Count, placements, unplaced);
         }
@@ -453,6 +465,14 @@ namespace SeaNest.Nesting.Core.Nesting
                 }
             }
 
+            if (interiorFallbackFired)
+            {
+                InteriorFallbackLog.Add(
+                    $"Part {partIndex} sheet {sheetIdx}: boundary failed (overlapRejects={overlapRejections}), " +
+                    $"interior fallback: {interiorValidCount}/{interiorCandidateCount} valid, " +
+                    $"best={(best != null ? $"yes pos=({best.X:F3},{best.Y:F3})" : "no")}");
+            }
+
             string interiorInfo = interiorFallbackFired
                 ? $", interior fallback: {interiorValidCount}/{interiorCandidateCount} valid"
                 : "";
@@ -733,6 +753,25 @@ namespace SeaNest.Nesting.Core.Nesting
             if (double.IsInfinity(x) || double.IsInfinity(y)) return false;
 
             return Math.Abs(x) <= bxLimit && Math.Abs(y) <= byLimit;
+        }
+
+        private static void FlushInteriorFallbackLog()
+        {
+            if (InteriorFallbackLog.Count == 0) return;
+
+            try
+            {
+                var lines = new List<string>
+                {
+                    $"Phase 26 interior fallback log written at {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
+                    ""
+                };
+                lines.AddRange(InteriorFallbackLog);
+                lines.Add("");
+                lines.Add($"Total interior fallback events: {InteriorFallbackLog.Count}");
+                File.WriteAllLines(InteriorFallbackLogPath, lines);
+            }
+            catch { /* best effort */ }
         }
 
         private static List<(double X, double Y)> SampleInteriorPoints(
