@@ -37,6 +37,8 @@ namespace SeaNest.Nesting.Core.Nesting
         public int PlacementsPerPart { get; set; } = 4;
         public int BeamMaxCandidates { get; set; } = 256;
 
+        public IReadOnlyList<int> CriticalPartIndices { get; set; }
+
         private static readonly string InteriorFallbackLogPath =
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
@@ -870,6 +872,91 @@ namespace SeaNest.Nesting.Core.Nesting
             public PlacementScore Score;
         }
 
+        private bool HasAnyValidPlacement(
+            int partIndex,
+            SheetState sheet)
+        {
+            var orientations = _orientationsByPart[partIndex];
+
+            foreach (var orientation in orientations)
+            {
+                var ifp = InnerFitPolygon.Compute(
+                    orientation,
+                    _request.SheetWidth,
+                    _request.SheetHeight,
+                    _request.Margin);
+
+                if (!ifp.HasValue)
+                    continue;
+
+                Paths64 forbidden = GetOrBuildForbiddenRegion(orientation, sheet);
+                Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
+
+                if (feasible.Count == 0)
+                    continue;
+
+                // Check boundary vertices first.
+                var candidates = FindCandidateVertices(feasible, BeamMaxCandidates);
+
+                foreach (var cand in candidates)
+                {
+                    if (!IsSaneCandidate(cand.X, cand.Y))
+                        continue;
+
+                    var candidatePoly = orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
+
+                    bool rejected = false;
+                    foreach (var placed in sheet.Placed)
+                    {
+                        var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
+                            placed.X, placed.Y);
+                        if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
+                        {
+                            rejected = true;
+                            break;
+                        }
+                    }
+
+                    if (!rejected)
+                        return true;
+                }
+
+                // Check interior samples if enabled.
+                if (EnableInteriorSampling)
+                {
+                    double step = InteriorSamplingStep ??
+                        Math.Max(1.0, _request.Spacing * 3.0);
+
+                    var interiorPoints = SampleInteriorPoints(feasible, step);
+
+                    foreach (var pt in interiorPoints)
+                    {
+                        if (!IsSaneCandidate(pt.X, pt.Y))
+                            continue;
+
+                        var candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
+
+                        bool rejected = false;
+                        foreach (var placed in sheet.Placed)
+                        {
+                            var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
+                                placed.X, placed.Y);
+                            if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
+                            {
+                                rejected = true;
+                                break;
+                            }
+                        }
+
+                        if (!rejected)
+                            return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         private List<ScoredCandidate> GenerateTopKCandidates(
             int partIndex,
             List<OrientedPart> orientations,
@@ -1040,7 +1127,32 @@ namespace SeaNest.Nesting.Core.Nesting
                 var orientations = _orientationsByPart[partIndex];
                 var nextBeam = new List<BeamState>();
 
+                // Build set of already-placed indices for future-domain check.
+                var placedIndicesSet = new HashSet<int>();
+                if (beam.Count > 0)
+                {
+                    foreach (var pp in beam[0].Placements)
+                        placedIndicesSet.Add(pp.OriginalIndex);
+                }
+                placedIndicesSet.Add(partIndex);
+
+                // Identify unplaced critical parts for future-domain pruning.
+                List<int> unplacedCriticals = null;
+                if (CriticalPartIndices != null && CriticalPartIndices.Count > 0)
+                {
+                    unplacedCriticals = new List<int>();
+                    foreach (int ci in CriticalPartIndices)
+                    {
+                        if (!placedIndicesSet.Contains(ci))
+                            unplacedCriticals.Add(ci);
+                    }
+                    if (unplacedCriticals.Count == 0)
+                        unplacedCriticals = null;
+                }
+
                 int stateIdx = 0;
+                int prunedByFutureDomain = 0;
+
                 foreach (var state in beam)
                 {
                     var topK = GenerateTopKCandidates(
@@ -1048,13 +1160,33 @@ namespace SeaNest.Nesting.Core.Nesting
                         BeamMaxCandidates, K,
                         out int bValid, out int iValid);
 
-                    int interiorInTopK = 0;
-
                     foreach (var cand in topK)
                     {
                         var newSheet = state.Sheet.Clone();
                         newSheet.Placed.Add(new PlacedItem(cand.Orientation, cand.X, cand.Y));
                         newSheet.ForbiddenByOrientation.Clear();
+
+                        // Phase 28.1: future-domain pruning. Check that each
+                        // unplaced critical part still has at least one legal
+                        // placement in this candidate state.
+                        bool prunedByFD = false;
+                        if (unplacedCriticals != null)
+                        {
+                            foreach (int ci in unplacedCriticals)
+                            {
+                                if (!HasAnyValidPlacement(ci, newSheet))
+                                {
+                                    prunedByFutureDomain++;
+                                    prunedByFD = true;
+                                    log.Add($"  Part {partIndex} state {stateIdx} candidate ({cand.X:F1},{cand.Y:F1}): " +
+                                            $"PRUNED — critical Part {ci} has 0 legal placements");
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (prunedByFD)
+                            continue;
 
                         var placedPoly = cand.Orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
 
@@ -1123,7 +1255,8 @@ namespace SeaNest.Nesting.Core.Nesting
                 if (nextBeam.Count > B)
                     nextBeam.RemoveRange(B, nextBeam.Count - B);
 
-                log.Add($"Part {partIndex} (step {step}): beam {beam.Count} -> branches {beam.Count * K} -> pruned {nextBeam.Count}, " +
+                string fdInfo = prunedByFutureDomain > 0 ? $" (futureDomain={prunedByFutureDomain})" : "";
+                log.Add($"Part {partIndex} (step {step}): beam {beam.Count} -> branches {beam.Count * K} -> survived {nextBeam.Count}{fdInfo}, " +
                         $"best score {nextBeam[0].TotalScore:F1}, elapsed {sw.ElapsedMilliseconds}ms");
 
                 beam = nextBeam;

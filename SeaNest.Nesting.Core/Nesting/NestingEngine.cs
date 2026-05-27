@@ -272,9 +272,27 @@ namespace SeaNest.Nesting.Core.Nesting
                             .Where(i => classes[i] == PartClass.Tiny)
                             .OrderByDescending(i => nfpPolygons[i].AbsoluteArea));
 
+                    // Phase 28.1: identify critical parts for future-domain
+                    // pruning. Irregular parts with bbox area >= 5% of sheet
+                    // area are critical — their large size means few valid
+                    // placements exist, and greedy decisions that foreclose
+                    // them cause beam-to-zero failures.
+                    double criticalThreshold = sheetArea * 0.05;
+                    var criticals = new List<int>();
+                    for (int i = 0; i < nfpPolygons.Count; i++)
+                    {
+                        if (classes[i] == PartClass.Irregular)
+                        {
+                            var bb = nfpPolygons[i].BoundingBox;
+                            if (bb.Width * bb.Height >= criticalThreshold)
+                                criticals.Add(i);
+                        }
+                    }
+                    engine.CriticalPartIndices = criticals;
+
                     DiagnosticCallback?.Invoke(
                         $"Phase 27: starting beam retry (headroom {totalArea / sheetArea:P1}, " +
-                        $"{result.SheetCount} sheets)...");
+                        $"{result.SheetCount} sheets, {criticals.Count} critical parts)...");
 
                     var beamResult = engine.TrySingleSheetBeamPack(
                         beamOrder,
