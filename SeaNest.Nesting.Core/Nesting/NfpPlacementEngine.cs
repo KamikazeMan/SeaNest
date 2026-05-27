@@ -38,7 +38,6 @@ namespace SeaNest.Nesting.Core.Nesting
         public int BeamMaxCandidates { get; set; } = 256;
 
         public IReadOnlyList<int> CriticalPartIndices { get; set; }
-        public HashSet<int> IrregularPartIndices { get; set; }
 
         private static readonly string InteriorFallbackLogPath =
             Path.Combine(
@@ -873,12 +872,10 @@ namespace SeaNest.Nesting.Core.Nesting
             public PlacementScore Score;
         }
 
-        private int CountValidPlacements(
+        private bool HasAnyValidPlacement(
             int partIndex,
-            SheetState sheet,
-            int cap)
+            SheetState sheet)
         {
-            int count = 0;
             var orientations = _orientationsByPart[partIndex];
 
             foreach (var orientation in orientations)
@@ -898,6 +895,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 if (feasible.Count == 0)
                     continue;
 
+                // Check boundary vertices first.
                 var candidates = FindCandidateVertices(feasible, BeamMaxCandidates);
 
                 foreach (var cand in candidates)
@@ -920,12 +918,10 @@ namespace SeaNest.Nesting.Core.Nesting
                     }
 
                     if (!rejected)
-                    {
-                        count++;
-                        if (count >= cap) return count;
-                    }
+                        return true;
                 }
 
+                // Check interior samples if enabled.
                 if (EnableInteriorSampling)
                 {
                     double step = InteriorSamplingStep ??
@@ -953,22 +949,12 @@ namespace SeaNest.Nesting.Core.Nesting
                         }
 
                         if (!rejected)
-                        {
-                            count++;
-                            if (count >= cap) return count;
-                        }
+                            return true;
                     }
                 }
             }
 
-            return count;
-        }
-
-        private bool HasAnyValidPlacement(
-            int partIndex,
-            SheetState sheet)
-        {
-            return CountValidPlacements(partIndex, sheet, 1) > 0;
+            return false;
         }
 
         private List<ScoredCandidate> GenerateTopKCandidates(
@@ -1108,15 +1094,12 @@ namespace SeaNest.Nesting.Core.Nesting
             if (partOrder == null || partOrder.Count == 0)
                 return null;
 
-            // Phase 28.2: mutable copy of order for MRV reordering.
-            var mutableOrder = new List<int>(partOrder);
-
             var sw = Stopwatch.StartNew();
             var log = new List<string>
             {
                 $"Phase 27 beam search run at {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
-                $"Parts: {mutableOrder.Count}, B={B}, K={K}, maxCandidates={BeamMaxCandidates}, budget={budget.TotalSeconds:F0}s",
-                $"Order: {string.Join(",", mutableOrder)}",
+                $"Parts: {partOrder.Count}, B={B}, K={K}, maxCandidates={BeamMaxCandidates}, budget={budget.TotalSeconds:F0}s",
+                $"Order: {string.Join(",", partOrder)}",
                 ""
             };
 
@@ -1131,72 +1114,16 @@ namespace SeaNest.Nesting.Core.Nesting
 
             var beam = new List<BeamState> { initialState };
 
-            for (int step = 0; step < mutableOrder.Count; step++)
+            for (int step = 0; step < partOrder.Count; step++)
             {
                 if (sw.Elapsed >= budget)
                 {
-                    log.Add($"Part {mutableOrder[step]} (step {step}): time budget exceeded at {sw.ElapsedMilliseconds}ms. Aborting.");
+                    log.Add($"Part {partOrder[step]} (step {step}): time budget exceeded at {sw.ElapsedMilliseconds}ms. Aborting.");
                     FlushBeamLog(log);
                     return null;
                 }
 
-                // Phase 28.2: MRV reordering within Irregular tier.
-                if (IrregularPartIndices != null &&
-                    IrregularPartIndices.Contains(mutableOrder[step]))
-                {
-                    // Count unplaced Irregulars from this step onward.
-                    var unplacedIrregulars = new List<int>();
-                    for (int j = step; j < mutableOrder.Count; j++)
-                    {
-                        if (IrregularPartIndices.Contains(mutableOrder[j]))
-                            unplacedIrregulars.Add(mutableOrder[j]);
-                    }
-
-                    if (unplacedIrregulars.Count >= 2 && beam.Count > 0)
-                    {
-                        const int mrvCap = 10;
-                        int bestIdx = unplacedIrregulars[0];
-                        int bestMinCount = int.MaxValue;
-                        double bestBBoxArea = 0;
-                        var mrvDetails = new List<string>();
-
-                        foreach (int ui in unplacedIrregulars)
-                        {
-                            int minCount = int.MaxValue;
-                            foreach (var state in beam)
-                            {
-                                int c = CountValidPlacements(ui, state.Sheet, mrvCap);
-                                if (c < minCount) minCount = c;
-                            }
-
-                            var bb = _request.Polygons[ui].BoundingBox;
-                            double bboxArea = bb.Width * bb.Height;
-                            mrvDetails.Add($"{ui}={minCount}");
-
-                            if (minCount < bestMinCount ||
-                                (minCount == bestMinCount && bboxArea > bestBBoxArea))
-                            {
-                                bestIdx = ui;
-                                bestMinCount = minCount;
-                                bestBBoxArea = bboxArea;
-                            }
-                        }
-
-                        log.Add($"Part {mutableOrder[step]} (step {step}): MRV evaluated [{string.Join(", ", mrvDetails)}], picked Part {bestIdx}");
-
-                        if (bestIdx != mutableOrder[step])
-                        {
-                            int swapFrom = mutableOrder.IndexOf(bestIdx);
-                            if (swapFrom > step)
-                            {
-                                mutableOrder.RemoveAt(swapFrom);
-                                mutableOrder.Insert(step, bestIdx);
-                            }
-                        }
-                    }
-                }
-
-                int partIndex = mutableOrder[step];
+                int partIndex = partOrder[step];
                 var orientations = _orientationsByPart[partIndex];
                 var nextBeam = new List<BeamState>();
 
@@ -1337,7 +1264,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             var best = beam[0];
             log.Add("");
-            log.Add($"Phase 27: beam search succeeded — all {mutableOrder.Count} parts on 1 sheet. " +
+            log.Add($"Phase 27: beam search succeeded — all {partOrder.Count} parts on 1 sheet. " +
                     $"Total score {best.TotalScore:F1}, elapsed {sw.ElapsedMilliseconds}ms.");
             FlushBeamLog(log);
 
