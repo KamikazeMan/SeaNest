@@ -875,9 +875,13 @@ namespace SeaNest.Nesting.Core.Nesting
             List<OrientedPart> orientations,
             SheetState sheet,
             int maxCandidates,
-            int topK)
+            int topK,
+            out int boundaryValidCount,
+            out int interiorValidCount)
         {
             var all = new List<ScoredCandidate>();
+            boundaryValidCount = 0;
+            interiorValidCount = 0;
 
             foreach (var orientation in orientations)
             {
@@ -896,6 +900,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 if (feasible.Count == 0)
                     continue;
 
+                // Boundary vertex candidates.
                 var candidates = FindCandidateVertices(feasible, maxCandidates);
 
                 foreach (var cand in candidates)
@@ -920,6 +925,7 @@ namespace SeaNest.Nesting.Core.Nesting
                     if (rejected)
                         continue;
 
+                    boundaryValidCount++;
                     var score = ScorePlacementCandidate(candidatePoly, sheet);
                     all.Add(new ScoredCandidate
                     {
@@ -928,6 +934,51 @@ namespace SeaNest.Nesting.Core.Nesting
                         Y = cand.Y,
                         Score = score
                     });
+                }
+
+                // Phase 28.0: interior sampling for beam candidate generation.
+                // Same logic as Phase 26's fallback in TryPlaceOnSheet, but
+                // runs unconditionally (not as a fallback) to maximize the
+                // candidate pool before K-truncation.
+                if (EnableInteriorSampling)
+                {
+                    double step = InteriorSamplingStep ??
+                        Math.Max(1.0, _request.Spacing * 3.0);
+
+                    var interiorPoints = SampleInteriorPoints(feasible, step);
+
+                    foreach (var pt in interiorPoints)
+                    {
+                        if (!IsSaneCandidate(pt.X, pt.Y))
+                            continue;
+
+                        var candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
+
+                        bool rejected = false;
+                        foreach (var placed in sheet.Placed)
+                        {
+                            var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
+                                placed.X, placed.Y);
+                            if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
+                            {
+                                rejected = true;
+                                break;
+                            }
+                        }
+
+                        if (rejected)
+                            continue;
+
+                        interiorValidCount++;
+                        var score = ScorePlacementCandidate(candidatePoly, sheet);
+                        all.Add(new ScoredCandidate
+                        {
+                            Orientation = orientation,
+                            X = pt.X,
+                            Y = pt.Y,
+                            Score = score
+                        });
+                    }
                 }
             }
 
@@ -989,11 +1040,15 @@ namespace SeaNest.Nesting.Core.Nesting
                 var orientations = _orientationsByPart[partIndex];
                 var nextBeam = new List<BeamState>();
 
+                int stateIdx = 0;
                 foreach (var state in beam)
                 {
                     var topK = GenerateTopKCandidates(
                         partIndex, orientations, state.Sheet,
-                        BeamMaxCandidates, K);
+                        BeamMaxCandidates, K,
+                        out int bValid, out int iValid);
+
+                    int interiorInTopK = 0;
 
                     foreach (var cand in topK)
                     {
@@ -1041,6 +1096,12 @@ namespace SeaNest.Nesting.Core.Nesting
                             MaxUsedRight = newMaxRight
                         });
                     }
+
+                    if (EnableInteriorSampling && (bValid > 0 || iValid > 0))
+                    {
+                        log.Add($"  Part {partIndex} state {stateIdx}: boundary={bValid} valid, interior={iValid} valid, topK={topK.Count}");
+                    }
+                    stateIdx++;
                 }
 
                 if (nextBeam.Count == 0)
