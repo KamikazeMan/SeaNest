@@ -39,6 +39,8 @@ namespace SeaNest.Commands
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.NFP_Annealed;
         private const bool DefaultAllowMirror = true;
         private const double DefaultTimeBudgetSeconds = 30.0;
+        private const double DefaultEvacuationBudgetSeconds = 60.0;
+        private const double DefaultShelfPackBudgetSeconds = 60.0;
 
         // Phase 18 — match BrepFlattener's vertex cap so the engine never sees
         // a curve's raw chord-tessellation. Original Rhino Curve is preserved
@@ -58,6 +60,9 @@ namespace SeaNest.Commands
                 : 1.0;
 
             double sheetW, sheetH, sheetT, margin, spacing, timeBudgetSeconds;
+            double evacuationBudgetSeconds = 0.0;
+            double shelfPackBudgetSeconds = 0.0;
+            int randomSeed = 0;
             RotationStep rotStep;
             NestingAlgorithm algorithm;
             bool allowMirror;
@@ -95,6 +100,31 @@ namespace SeaNest.Commands
                         RhinoApp.WriteLine("Time budget must be positive.");
                         return Rhino.Commands.Result.Failure;
                     }
+
+                    if (!SeaNestNestCommand.PromptForDouble(doc, "Evacuation budget (seconds, 0=off)", DefaultEvacuationBudgetSeconds, out evacuationBudgetSeconds))
+                        return Rhino.Commands.Result.Cancel;
+                    if (evacuationBudgetSeconds < 0)
+                    {
+                        RhinoApp.WriteLine("Evacuation budget cannot be negative.");
+                        return Rhino.Commands.Result.Failure;
+                    }
+
+                    if (!SeaNestNestCommand.PromptForDouble(doc, "Single-sheet shelf-pack budget (seconds, 0=off)", DefaultShelfPackBudgetSeconds, out shelfPackBudgetSeconds))
+                        return Rhino.Commands.Result.Cancel;
+                    if (shelfPackBudgetSeconds < 0)
+                    {
+                        RhinoApp.WriteLine("Shelf-pack budget cannot be negative.");
+                        return Rhino.Commands.Result.Failure;
+                    }
+
+                    var gi = new Rhino.Input.Custom.GetInteger();
+                    gi.SetCommandPrompt("Random seed (0=deterministic)");
+                    gi.SetDefaultInteger(0);
+                    gi.AcceptNothing(true);
+                    var giRes = gi.Get();
+                    if (giRes == GetResult.Nothing) randomSeed = 0;
+                    else if (giRes == GetResult.Number) randomSeed = (int)gi.Number();
+                    else return Rhino.Commands.Result.Cancel;
                 }
                 else
                 {
@@ -405,7 +435,14 @@ namespace SeaNest.Commands
                         dialog.UpdateStatus(msg);
                         Application.Instance.RunIteration();
                     },
-                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg)
+                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg),
+                    RandomSeed = randomSeed,
+                    EvacuationTimeBudget = evacuationBudgetSeconds > 0
+                        ? TimeSpan.FromSeconds(evacuationBudgetSeconds)
+                        : (TimeSpan?)null,
+                    ShelfPackTimeBudget = shelfPackBudgetSeconds > 0
+                        ? TimeSpan.FromSeconds(shelfPackBudgetSeconds)
+                        : (TimeSpan?)null
                 };
                 response = engine.Nest(request);
             }

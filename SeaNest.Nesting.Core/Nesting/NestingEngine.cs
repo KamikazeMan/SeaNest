@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using SeaNest.Nesting.Core.Geometry;
 using SeaNest.Nesting.Core.Overlap;
@@ -53,6 +54,26 @@ namespace SeaNest.Nesting.Core.Nesting
         /// progress bar. Typically wired to a logger or RhinoApp.WriteLine. May be null.
         /// </summary>
         public Action<string> DiagnosticCallback { get; set; }
+
+        /// <summary>
+        /// Phase 23: optional time budget for last-sheet evacuation after SA
+        /// converges. Null = evacuation disabled. NFP_Annealed only.
+        /// </summary>
+        public TimeSpan? EvacuationTimeBudget { get; set; }
+
+        /// <summary>
+        /// Phase 24b: optional time budget for single-sheet shelf-pack retry
+        /// after SA + Phase 23 evacuation. Null = shelf-pack disabled.
+        /// NFP_Annealed only; fires when result still has >= 2 sheets.
+        /// </summary>
+        public TimeSpan? ShelfPackTimeBudget { get; set; }
+
+        /// <summary>
+        /// Phase 25: SA random seed. Default null = use 0 (deterministic,
+        /// same parts → same layout). Set to a non-zero value to explore
+        /// different SA trajectories without recompiling.
+        /// </summary>
+        public int? RandomSeed { get; set; }
 
         public NestResponse Nest(NestRequest request)
         {
@@ -128,7 +149,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             try
             {
-                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache, nfpPolygons);
+                return RunNfpInner(request, stopwatch, useAnnealing, engine, cache, nfpPolygons, orientationsByPart);
             }
             finally
             {
@@ -143,7 +164,8 @@ namespace SeaNest.Nesting.Core.Nesting
             bool useAnnealing,
             NfpPlacementEngine engine,
             NfpCache cache,
-            IReadOnlyList<Polygon> nfpPolygons)
+            IReadOnlyList<Polygon> nfpPolygons,
+            IReadOnlyList<List<OrientedPart>> orientationsByPart)
         {
             // Step 4: Place parts.
             NfpPlacementEngine.NestResult result;
@@ -164,11 +186,14 @@ namespace SeaNest.Nesting.Core.Nesting
                     ? (Action<double, string>)null
                     : (frac, status) => ProgressCallback(0.15 + frac * 0.80, status);
 
+                int seed = RandomSeed ?? 0;
+                DiagnosticCallback?.Invoke($"NFP_Annealed: SA random seed = {seed}");
+
                 result = SimulatedAnnealing.Optimize(
                     engine,
                     initialOrder,
                     request.TimeBudget,
-                    randomSeed: 0,
+                    randomSeed: seed,
                     progressCallback: saProgress);
             }
             else
@@ -176,6 +201,20 @@ namespace SeaNest.Nesting.Core.Nesting
                 ProgressCallback?.Invoke(0.15, "Placing parts...");
                 result = engine.PlaceAll(initialOrder);
                 ProgressCallback?.Invoke(0.95, "Finalizing...");
+            }
+
+            // Phase 23: last-sheet evacuation pass (NFP_Annealed only).
+            if (useAnnealing && EvacuationTimeBudget.HasValue && result.SheetCount >= 2)
+            {
+                result = TryEvacuateLastSheet(
+                    result, request, orientationsByPart, cache);
+            }
+
+            // Phase 24b: single-sheet shelf-pack attempt (NFP_Annealed only).
+            if (useAnnealing && ShelfPackTimeBudget.HasValue && result.SheetCount >= 2)
+            {
+                result = TrySingleSheetShelfPack(
+                    result, request, nfpPolygons, orientationsByPart, cache);
             }
 
             // Step 5: Sort placements by original index for stable downstream rendering.
@@ -216,6 +255,682 @@ namespace SeaNest.Nesting.Core.Nesting
                 stopwatch.Elapsed);
         }
 
+        // ==================================================================
+        // Phase 23: last-sheet evacuation
+        // ==================================================================
+
+        private const int MaxEvacuationAttempts = 100;
+
+        private NfpPlacementEngine.NestResult TryEvacuateLastSheet(
+            NfpPlacementEngine.NestResult originalResult,
+            NestRequest request,
+            IReadOnlyList<List<OrientedPart>> orientationsByPart,
+            NfpCache cache)
+        {
+            int sheetCount = originalResult.SheetCount;
+            if (sheetCount < 2) return originalResult;
+
+            var budget = EvacuationTimeBudget.Value;
+            var sw = Stopwatch.StartNew();
+
+            double usableArea = request.UsableWidth * request.UsableHeight;
+
+            // Find the lowest-utilization sheet.
+            var sheetArea = new double[sheetCount];
+            var sheetPartCount = new int[sheetCount];
+            foreach (var p in originalResult.Placements)
+            {
+                sheetArea[p.Sheet] += p.PlacedPolygon.AbsoluteArea;
+                sheetPartCount[p.Sheet]++;
+            }
+
+            int targetSheet = 0;
+            double lowestUtil = double.MaxValue;
+            for (int s = 0; s < sheetCount; s++)
+            {
+                double util = usableArea > 0 ? sheetArea[s] / usableArea : 0;
+                if (util < lowestUtil)
+                {
+                    lowestUtil = util;
+                    targetSheet = s;
+                }
+            }
+
+            DiagnosticCallback?.Invoke(
+                $"Phase 23: starting evacuation pass on sheet {targetSheet} " +
+                $"(utilization {lowestUtil * 100.0:F1}%, {sheetPartCount[targetSheet]} parts), " +
+                $"budget {budget.TotalSeconds:F0}s");
+
+            // Partition placements into kept (other sheets) and target (evacuees).
+            var keptIndices = new List<int>();
+            var targetIndices = new List<int>();
+            foreach (var p in originalResult.Placements)
+            {
+                if (p.Sheet == targetSheet)
+                    targetIndices.Add(p.OriginalIndex);
+                else
+                    keptIndices.Add(p.OriginalIndex);
+            }
+
+            // Pre-compute target part areas for sorting strategies.
+            var targetAreas = new Dictionary<int, double>();
+            foreach (var p in originalResult.Placements)
+            {
+                if (p.Sheet == targetSheet)
+                    targetAreas[p.OriginalIndex] = p.PlacedPolygon.AbsoluteArea;
+            }
+
+            // Pre-compute kept part areas for sorting strategies.
+            var keptAreas = new Dictionary<int, double>();
+            foreach (var p in originalResult.Placements)
+            {
+                if (p.Sheet != targetSheet)
+                    keptAreas[p.OriginalIndex] = p.PlacedPolygon.AbsoluteArea;
+            }
+
+            // Pre-compute target aspect ratios for strategy 5.
+            var targetAspect = new Dictionary<int, double>();
+            foreach (var p in originalResult.Placements)
+            {
+                if (p.Sheet == targetSheet)
+                {
+                    var bb = p.PlacedPolygon.BoundingBox;
+                    double w = bb.MaxX - bb.MinX;
+                    double h = bb.MaxY - bb.MinY;
+                    double maxDim = Math.Max(w, h);
+                    double minDim = Math.Min(w, h);
+                    targetAspect[p.OriginalIndex] = maxDim > 1e-12 ? minDim / maxDim : 1.0;
+                }
+            }
+
+            NfpPlacementEngine.NestResult bestEvac = null;
+            int attemptIndex = 0;
+
+            while (sw.Elapsed < budget && attemptIndex < MaxEvacuationAttempts)
+            {
+                attemptIndex++;
+
+                var order = BuildEvacuationAttemptOrder(
+                    attemptIndex, keptIndices, targetIndices,
+                    keptAreas, targetAreas, targetAspect);
+
+                DiagnosticCallback?.Invoke(
+                    $"Phase 23: attempt {attemptIndex} ({order.Strategy}): " +
+                    $"kept={keptIndices.Count}, target={targetIndices.Count}...");
+
+                var evacEngine = new NfpPlacementEngine(request, orientationsByPart, cache)
+                {
+                    DiagnosticLog = null,
+                    MaxCandidateVertices = 512
+                };
+
+                var attemptResult = evacEngine.PlaceAll(order.Order);
+
+                if (attemptResult.SheetCount < sheetCount &&
+                    attemptResult.Unplaced.Count <= originalResult.Unplaced.Count)
+                {
+                    DiagnosticCallback?.Invoke(
+                        $"Phase 23: attempt {attemptIndex} succeeded " +
+                        $"({sheetCount} -> {attemptResult.SheetCount} sheets). " +
+                        $"Elapsed {sw.ElapsedMilliseconds}ms.");
+                    bestEvac = attemptResult;
+                    break;
+                }
+
+                DiagnosticCallback?.Invoke(
+                    $"Phase 23: attempt {attemptIndex} produced " +
+                    $"{attemptResult.SheetCount} sheets, " +
+                    $"{attemptResult.Unplaced.Count} unplaced — discarding.");
+            }
+
+            if (bestEvac != null)
+            {
+                DiagnosticCallback?.Invoke(
+                    $"Phase 23: evacuation succeeded after {attemptIndex} attempts, " +
+                    $"{sw.ElapsedMilliseconds}ms elapsed.");
+                return bestEvac;
+            }
+
+            DiagnosticCallback?.Invoke(
+                $"Phase 23: evacuation failed after {attemptIndex} attempts " +
+                $"in {sw.ElapsedMilliseconds}ms, keeping original layout.");
+            return originalResult;
+        }
+
+        private struct EvacuationOrder
+        {
+            public List<int> Order;
+            public string Strategy;
+        }
+
+        private static EvacuationOrder BuildEvacuationAttemptOrder(
+            int attemptIndex,
+            List<int> keptIndices,
+            List<int> targetIndices,
+            Dictionary<int, double> keptAreas,
+            Dictionary<int, double> targetAreas,
+            Dictionary<int, double> targetAspect)
+        {
+            List<int> kept;
+            List<int> target;
+            string strategy;
+
+            switch (attemptIndex)
+            {
+                case 1:
+                    kept = new List<int>(keptIndices);
+                    target = SortedBy(targetIndices, targetAreas, ascending: true);
+                    strategy = "kept-original + target-smallest-first";
+                    break;
+
+                case 2:
+                    kept = new List<int>(keptIndices);
+                    target = SortedBy(targetIndices, targetAreas, ascending: false);
+                    strategy = "kept-original + target-largest-first";
+                    break;
+
+                case 3:
+                    kept = SortedBy(keptIndices, keptAreas, ascending: false);
+                    target = SortedBy(targetIndices, targetAreas, ascending: true);
+                    strategy = "kept-largest-first + target-smallest-first";
+                    break;
+
+                case 4:
+                    kept = SortedBy(keptIndices, keptAreas, ascending: false);
+                    target = SortedBy(targetIndices, targetAreas, ascending: false);
+                    strategy = "kept-largest-first + target-largest-first";
+                    break;
+
+                case 5:
+                    kept = new List<int>(keptIndices);
+                    target = SortedBy(targetIndices, targetAspect, ascending: false);
+                    strategy = "kept-original + target-squarest-first";
+                    break;
+
+                default:
+                    var rng = new Random(attemptIndex);
+                    kept = Shuffled(keptIndices, rng);
+                    target = Shuffled(targetIndices, rng);
+                    strategy = $"shuffled (seed={attemptIndex})";
+                    break;
+            }
+
+            var order = new List<int>(kept.Count + target.Count);
+            order.AddRange(kept);
+            order.AddRange(target);
+
+            return new EvacuationOrder { Order = order, Strategy = strategy };
+        }
+
+        private static List<int> SortedBy(
+            List<int> indices,
+            Dictionary<int, double> values,
+            bool ascending)
+        {
+            var sorted = new List<int>(indices);
+            sorted.Sort((a, b) =>
+            {
+                double va = values.ContainsKey(a) ? values[a] : 0;
+                double vb = values.ContainsKey(b) ? values[b] : 0;
+                return ascending ? va.CompareTo(vb) : vb.CompareTo(va);
+            });
+            return sorted;
+        }
+
+        private static List<int> Shuffled(List<int> indices, Random rng)
+        {
+            var shuffled = new List<int>(indices);
+            for (int i = shuffled.Count - 1; i > 0; i--)
+            {
+                int j = rng.Next(i + 1);
+                int tmp = shuffled[i];
+                shuffled[i] = shuffled[j];
+                shuffled[j] = tmp;
+            }
+            return shuffled;
+        }
+
+
+        // ==================================================================
+        // Phase 24b: single-sheet shelf-pack
+        // ==================================================================
+
+        private const double ShelfPackHeadroomFraction = 0.70;
+        private const double ShelfPackMaxBandDepthFraction = 0.55;
+
+        private static readonly string ShelfPackOutputPath =
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                "phase24b_shelfpack.txt");
+
+        private enum ShelfSide { Top, Bottom }
+
+        private NfpPlacementEngine.NestResult TrySingleSheetShelfPack(
+            NfpPlacementEngine.NestResult originalResult,
+            NestRequest request,
+            IReadOnlyList<Polygon> nfpPolygons,
+            IReadOnlyList<List<OrientedPart>> orientationsByPart,
+            NfpCache cache)
+        {
+            var budget = ShelfPackTimeBudget.Value;
+            var sw = Stopwatch.StartNew();
+            var log = new List<string>();
+            log.Add($"Phase 24b shelf-pack run at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            log.Add($"Budget: {budget.TotalSeconds:F0}s, sheets before: {originalResult.SheetCount}");
+            log.Add("");
+
+            // Headroom check.
+            double totalArea = 0;
+            for (int i = 0; i < nfpPolygons.Count; i++)
+                totalArea += nfpPolygons[i].AbsoluteArea;
+            double sheetArea = request.SheetWidth * request.SheetHeight;
+            double headroom = totalArea / sheetArea;
+
+            if (headroom >= ShelfPackHeadroomFraction)
+            {
+                log.Add($"Headroom check FAILED: total part area {totalArea:F1} / sheet area {sheetArea:F1} = {headroom:P1} >= {ShelfPackHeadroomFraction:P0} limit.");
+                log.Add("Shelf-pack skipped — single sheet is mathematically infeasible.");
+                WriteShelfPackLog(log);
+                DiagnosticCallback?.Invoke("Phase 24b shelf-pack: headroom failed, skipping.");
+                return originalResult;
+            }
+
+            log.Add($"Headroom check passed: {headroom:P1} < {ShelfPackHeadroomFraction:P0}.");
+            log.Add("");
+
+            // Classify all parts.
+            var classes = new PartClass[nfpPolygons.Count];
+            var majorIndices = new List<int>();
+            var minorIndices = new List<int>();
+            var irregularIndices = new List<int>();
+            var tinyIndices = new List<int>();
+
+            for (int i = 0; i < nfpPolygons.Count; i++)
+            {
+                classes[i] = PartClassifier.Classify(nfpPolygons[i]);
+                switch (classes[i])
+                {
+                    case PartClass.StripMajor: majorIndices.Add(i); break;
+                    case PartClass.StripMinor: minorIndices.Add(i); break;
+                    case PartClass.Tiny: tinyIndices.Add(i); break;
+                    default: irregularIndices.Add(i); break;
+                }
+            }
+
+            log.Add($"Classification: {majorIndices.Count} major, {minorIndices.Count} minor, " +
+                    $"{irregularIndices.Count} irregular, {tinyIndices.Count} tiny.");
+            log.Add("");
+
+            if (majorIndices.Count == 0)
+            {
+                log.Add("No StripMajor parts — shelf-pack not applicable.");
+                WriteShelfPackLog(log);
+                DiagnosticCallback?.Invoke("Phase 24b shelf-pack: no StripMajor parts, skipping.");
+                return originalResult;
+            }
+
+            // Sort StripMajor by longest side descending.
+            majorIndices.Sort((a, b) =>
+            {
+                double la = Math.Max(nfpPolygons[a].BoundingBox.Width, nfpPolygons[a].BoundingBox.Height);
+                double lb = Math.Max(nfpPolygons[b].BoundingBox.Width, nfpPolygons[b].BoundingBox.Height);
+                return lb.CompareTo(la);
+            });
+
+            // Try each strategy.
+            var strategies = new[] { ShelfSide.Top, ShelfSide.Bottom };
+            NfpPlacementEngine.NestResult bestResult = null;
+
+            foreach (var side in strategies)
+            {
+                if (sw.Elapsed >= budget) break;
+
+                log.Add($"--- Strategy: shelf on {side} ---");
+
+                var attempt = TryShelfStrategy(
+                    side, request, nfpPolygons, orientationsByPart, cache,
+                    majorIndices, irregularIndices, minorIndices, tinyIndices,
+                    log);
+
+                if (attempt != null && attempt.SheetCount == 1 &&
+                    attempt.Unplaced.Count == 0)
+                {
+                    log.Add($"Strategy {side}: SUCCESS — all parts on 1 sheet.");
+                    bestResult = attempt;
+                    break;
+                }
+
+                string reason = attempt == null ? "shelf overflow"
+                    : $"{attempt.SheetCount} sheets, {attempt.Unplaced.Count} unplaced";
+                log.Add($"Strategy {side}: failed ({reason}).");
+                log.Add("");
+            }
+
+            log.Add("");
+            if (bestResult != null)
+            {
+                log.Add($"Phase 24b: shelf-pack succeeded ({sw.ElapsedMilliseconds}ms).");
+                WriteShelfPackLog(log);
+                DiagnosticCallback?.Invoke(
+                    $"Phase 24b shelf-pack succeeded — see Desktop\\phase24b_shelfpack.txt " +
+                    $"(1 sheet, {sw.ElapsedMilliseconds}ms).");
+                return bestResult;
+            }
+
+            log.Add($"Phase 24b: all strategies failed, keeping original {originalResult.SheetCount}-sheet layout ({sw.ElapsedMilliseconds}ms).");
+            WriteShelfPackLog(log);
+            DiagnosticCallback?.Invoke(
+                $"Phase 24b shelf-pack failed (all strategies), keeping original layout — " +
+                $"see Desktop\\phase24b_shelfpack.txt");
+            return originalResult;
+        }
+
+        private NfpPlacementEngine.NestResult TryShelfStrategy(
+            ShelfSide side,
+            NestRequest request,
+            IReadOnlyList<Polygon> nfpPolygons,
+            IReadOnlyList<List<OrientedPart>> orientationsByPart,
+            NfpCache cache,
+            List<int> majorIndices,
+            List<int> irregularIndices,
+            List<int> minorIndices,
+            List<int> tinyIndices,
+            List<string> log)
+        {
+            double shelfLength = request.UsableWidth;
+            double perpDimension = request.UsableHeight;
+            double spacing = request.Spacing;
+            double maxBandDepth = ShelfPackMaxBandDepthFraction * perpDimension;
+
+            // Phase 24b.2: multi-row first-fit-decreasing shelf packing.
+            // Each row tracks its cursor (along shelf direction) and height
+            // (max perpendicular extent of parts in that row).
+            var rows = new List<(double cursor, double height, List<int> parts)>();
+            var stripPositions = new List<(int partIndex, double x, double y, double rotDeg)>();
+
+            // Temporary per-part data for position computation after row layout.
+            var partRowAssignment = new List<(int partIndex, int rowIdx, double cursorAtPlace, double longSide, double shortSide, double rotDeg)>();
+
+            for (int i = 0; i < majorIndices.Count; i++)
+            {
+                int idx = majorIndices[i];
+                var bbox = nfpPolygons[idx].BoundingBox;
+                double longSide = Math.Max(bbox.Width, bbox.Height);
+                double shortSide = Math.Min(bbox.Width, bbox.Height);
+                bool needsRotate = bbox.Height > bbox.Width;
+                double rotDeg = needsRotate ? 90.0 : 0.0;
+
+                // First-fit into existing rows.
+                bool placed = false;
+                for (int r = 0; r < rows.Count; r++)
+                {
+                    var row = rows[r];
+                    if (row.cursor + longSide <= shelfLength + request.Margin + 0.01)
+                    {
+                        partRowAssignment.Add((idx, r, row.cursor, longSide, shortSide, rotDeg));
+                        row.parts.Add(idx);
+                        rows[r] = (row.cursor + longSide + spacing,
+                                   Math.Max(row.height, shortSide),
+                                   row.parts);
+                        placed = true;
+                        break;
+                    }
+                }
+
+                if (!placed)
+                {
+                    // Compute candidate band depth if we add this row.
+                    double depthSoFar = 0;
+                    for (int r = 0; r < rows.Count; r++)
+                        depthSoFar += rows[r].height;
+                    depthSoFar += rows.Count * spacing;
+                    double candidateDepth = depthSoFar + shortSide;
+
+                    if (candidateDepth > maxBandDepth)
+                    {
+                        log.Add($"  StripMajor part {idx} ({longSide:F1}x{shortSide:F1}) would push band depth to {candidateDepth:F1} > cap {maxBandDepth:F1}.");
+                        return null;
+                    }
+
+                    int newRowIdx = rows.Count;
+                    var newParts = new List<int> { idx };
+                    rows.Add((request.Margin + longSide + spacing, shortSide, newParts));
+                    partRowAssignment.Add((idx, newRowIdx, request.Margin, longSide, shortSide, rotDeg));
+                }
+            }
+
+            // Compute total shelf depth.
+            double shelfDepth = 0;
+            for (int r = 0; r < rows.Count; r++)
+            {
+                shelfDepth += rows[r].height;
+                if (r > 0) shelfDepth += spacing;
+            }
+            shelfDepth += spacing;
+
+            // Compute per-row Y start positions based on shelf side.
+            var rowStartY = new double[rows.Count];
+            if (side == ShelfSide.Top)
+            {
+                double y = request.SheetHeight - request.Margin;
+                for (int r = 0; r < rows.Count; r++)
+                {
+                    y -= rows[r].height;
+                    rowStartY[r] = y;
+                    y -= spacing;
+                }
+            }
+            else // Bottom
+            {
+                double y = request.Margin;
+                for (int r = 0; r < rows.Count; r++)
+                {
+                    rowStartY[r] = y;
+                    y += rows[r].height + spacing;
+                }
+            }
+
+            // Build final strip positions.
+            foreach (var (partIndex, rowIdx, cursorAtPlace, longSide, shortSide, rotDeg) in partRowAssignment)
+            {
+                double px = cursorAtPlace;
+                double py = rowStartY[rowIdx];
+                stripPositions.Add((partIndex, px, py, rotDeg));
+            }
+
+            // Diagnostic: per-row summary.
+            for (int r = 0; r < rows.Count; r++)
+            {
+                var row = rows[r];
+                string partList = string.Join(", ", row.parts);
+                log.Add($"  Row {r} at y={rowStartY[r]:F1}: parts [{partList}] (height {row.height:F1})");
+            }
+            log.Add($"  Shelf: {rows.Count} rows, total depth {shelfDepth:F2}, {stripPositions.Count} StripMajor parts placed.");
+
+            // Build reduced-sheet NestRequest for Irregulars.
+            double reducedW = request.SheetWidth;
+            double reducedH = request.SheetHeight - shelfDepth;
+            double irregOffsetX = 0, irregOffsetY = 0;
+
+            if (side == ShelfSide.Bottom)
+                irregOffsetY = shelfDepth;
+
+            if (reducedW <= 2 * request.Margin || reducedH <= 2 * request.Margin)
+            {
+                log.Add("  Reduced sheet too small for margin.");
+                return null;
+            }
+
+            // Place Irregulars on the reduced sheet.
+            // Reuse orientationsByPart entries rather than rebuilding.
+            var irregPolygons = new List<Polygon>();
+            var irregOrientations = new List<List<OrientedPart>>();
+            var irregIndexMap = new Dictionary<int, int>();
+            for (int i = 0; i < irregularIndices.Count; i++)
+            {
+                int origIdx = irregularIndices[i];
+                irregPolygons.Add(nfpPolygons[origIdx]);
+                irregOrientations.Add(orientationsByPart[origIdx]);
+                irregIndexMap[i] = origIdx;
+            }
+
+            NestRequest reducedRequest;
+            try
+            {
+                reducedRequest = new NestRequest(
+                    irregPolygons, reducedW, reducedH,
+                    request.SheetThickness, request.Margin, request.Spacing,
+                    request.RotationStep, NestingAlgorithm.NFP_Greedy, request.AllowMirror,
+                    request.TimeBudget);
+            }
+            catch
+            {
+                log.Add("  Reduced NestRequest construction failed.");
+                return null;
+            }
+
+            var irregEngine = new NfpPlacementEngine(reducedRequest, irregOrientations, cache)
+            {
+                DiagnosticLog = null,
+                MaxCandidateVertices = 512
+            };
+
+            var irregOrder = BuildLargestFirstOrder(irregPolygons);
+            var irregResult = irregEngine.PlaceAll(irregOrder);
+
+            if (irregResult.SheetCount > 1 || irregResult.Unplaced.Count > 0)
+            {
+                log.Add($"  Irregular placement: {irregResult.SheetCount} sheets, {irregResult.Unplaced.Count} unplaced — failed.");
+                return null;
+            }
+
+            log.Add($"  Irregular placement: all {irregPolygons.Count} parts on 1 reduced sheet.");
+
+            // Composite all placements into a single sheet.
+            var allPlacements = new List<PlacementResult>();
+
+            // Build OrientedParts for the StripMajor shelf placements so the
+            // gap-fill engine can compute NFPs against them. Assign orientation
+            // indices past all existing indices to avoid collisions.
+            int nextOrientIdx = 0;
+            foreach (var perPart in orientationsByPart)
+                foreach (var op in perPart)
+                    if (op.OrientationIndex >= nextOrientIdx)
+                        nextOrientIdx = op.OrientationIndex + 1;
+
+            var preplacedList = new List<NfpPlacementEngine.PreplacedPart>();
+
+            // StripMajor placements (deterministic).
+            foreach (var (partIndex, px, py, rotDeg) in stripPositions)
+            {
+                var sourcePoly = nfpPolygons[partIndex];
+                var srcBBox = sourcePoly.BoundingBox;
+
+                double rotRad = rotDeg * Math.PI / 180.0;
+                var rotatedNormalized = sourcePoly.MoveToOrigin();
+                if (Math.Abs(rotDeg) > 0.01)
+                    rotatedNormalized = rotatedNormalized.RotateAround(Point2D.Origin, rotRad);
+                var rotBBox = rotatedNormalized.BoundingBox;
+
+                var step1 = Transform2D.Translation(-srcBBox.MinX, -srcBBox.MinY);
+                var step2 = Transform2D.RotationDegrees(rotDeg);
+                var step3 = Transform2D.Translation(-rotBBox.MinX, -rotBBox.MinY);
+                var step4 = Transform2D.Translation(px, py);
+                var combined = step1.Then(step2).Then(step3).Then(step4);
+
+                var placedPoly = rotatedNormalized.Translate(px, py);
+
+                var shelfOrientation = OrientedPart.Build(
+                    nextOrientIdx++, partIndex, sourcePoly, rotDeg, isMirrored: false);
+
+                var placement = new PlacementResult(
+                    originalIndex: partIndex,
+                    sheet: 0,
+                    transform: combined,
+                    rotationDeg: rotDeg,
+                    isMirrored: false,
+                    sourceBBoxMinX: srcBBox.MinX,
+                    sourceBBoxMaxX: srcBBox.MaxX,
+                    placedPolygon: placedPoly);
+
+                allPlacements.Add(placement);
+                preplacedList.Add(new NfpPlacementEngine.PreplacedPart(
+                    partIndex, 0, shelfOrientation, px, py, placement));
+            }
+
+            // Irregular placements (offset from reduced sheet to full sheet).
+            foreach (var pp in irregResult.Placements)
+            {
+                int originalIdx = irregIndexMap[pp.OriginalIndex];
+                double offsetX = irregOffsetX;
+                double offsetY = irregOffsetY;
+
+                var placedPoly = pp.PlacedPolygon.Translate(offsetX, offsetY);
+                var offsetTransform = pp.Transform.Then(Transform2D.Translation(offsetX, offsetY));
+
+                var sourcePoly = nfpPolygons[originalIdx];
+                var srcBBox = sourcePoly.BoundingBox;
+
+                // Build an OrientedPart for this placed irregular. Use the same
+                // rotation/mirror as the engine chose, with a fresh index.
+                var irregOrientation = OrientedPart.Build(
+                    nextOrientIdx++, originalIdx, sourcePoly,
+                    pp.RotationDeg, pp.IsMirrored);
+
+                // Compute the placed position in the full sheet's coordinate space.
+                var irregCanonBBox = irregOrientation.CanonicalPolygon.BoundingBox;
+                double placedX = placedPoly.BoundingBox.MinX - irregCanonBBox.MinX;
+                double placedY = placedPoly.BoundingBox.MinY - irregCanonBBox.MinY;
+
+                var placement = new PlacementResult(
+                    originalIndex: originalIdx,
+                    sheet: 0,
+                    transform: offsetTransform,
+                    rotationDeg: pp.RotationDeg,
+                    isMirrored: pp.IsMirrored,
+                    sourceBBoxMinX: srcBBox.MinX,
+                    sourceBBoxMaxX: srcBBox.MaxX,
+                    placedPolygon: placedPoly);
+
+                allPlacements.Add(placement);
+                preplacedList.Add(new NfpPlacementEngine.PreplacedPart(
+                    originalIdx, 0, irregOrientation, placedX, placedY, placement));
+            }
+
+            // Gap-fill: place StripMinor + Tiny using PlaceAllWithPreplaced.
+            var gapFillIndices = new List<int>();
+            gapFillIndices.AddRange(minorIndices);
+            gapFillIndices.AddRange(tinyIndices);
+
+            if (gapFillIndices.Count > 0)
+            {
+                var gapEngine = new NfpPlacementEngine(request, orientationsByPart, cache)
+                {
+                    DiagnosticLog = null,
+                    MaxCandidateVertices = 512
+                };
+
+                var gapResult = gapEngine.PlaceAllWithPreplaced(gapFillIndices, preplacedList);
+
+                if (gapResult.SheetCount > 1 || gapResult.Unplaced.Count > 0)
+                {
+                    log.Add($"  Gap-fill: {gapResult.SheetCount} sheets, {gapResult.Unplaced.Count} unplaced — failed.");
+                    return null;
+                }
+
+                log.Add($"  Gap-fill: all {gapFillIndices.Count} minor/tiny parts placed.");
+                return gapResult;
+            }
+
+            // No gap-fill parts needed — return the composite.
+            return new NfpPlacementEngine.NestResult(1, allPlacements, new List<int>());
+        }
+
+        private void WriteShelfPackLog(List<string> lines)
+        {
+            try { File.WriteAllLines(ShelfPackOutputPath, lines); }
+            catch { /* best effort */ }
+        }
         /// <summary>
         /// Largest-bbox-diagonal-first ordering. Same heuristic the BLF engine uses for
         /// its initial pass, and a good warm start for NFP_Greedy.

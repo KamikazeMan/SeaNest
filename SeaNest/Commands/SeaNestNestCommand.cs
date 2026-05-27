@@ -74,6 +74,8 @@ namespace SeaNest.Commands
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.BLF;
         private const bool DefaultAllowMirror = true;
         private const double DefaultTimeBudgetSeconds = 30.0;
+        private const double DefaultEvacuationBudgetSeconds = 60.0;
+        private const double DefaultShelfPackBudgetSeconds = 60.0;
 
         protected override Rhino.Commands.Result RunCommand(RhinoDoc doc, Rhino.Commands.RunMode mode)
         {
@@ -90,6 +92,9 @@ namespace SeaNest.Commands
             NestingAlgorithm algorithm;
             bool allowMirror;
             double timeBudgetSeconds;
+            double evacuationBudgetSeconds = 0.0;
+            double shelfPackBudgetSeconds = 0.0;
+            int randomSeed = 0;
 
             if (!PromptForDouble(doc, "Sheet width", DefaultSheetWidthIn * inToModel, out sheetW)) return Rhino.Commands.Result.Cancel;
             if (!PromptForDouble(doc, "Sheet height", DefaultSheetHeightIn * inToModel, out sheetH)) return Rhino.Commands.Result.Cancel;
@@ -120,6 +125,31 @@ namespace SeaNest.Commands
                         RhinoApp.WriteLine("Time budget must be positive.");
                         return Rhino.Commands.Result.Cancel;
                     }
+
+                    if (!PromptForDouble(doc, "Evacuation budget (seconds, 0=off)", DefaultEvacuationBudgetSeconds, out evacuationBudgetSeconds))
+                        return Rhino.Commands.Result.Cancel;
+                    if (evacuationBudgetSeconds < 0)
+                    {
+                        RhinoApp.WriteLine("Evacuation budget cannot be negative.");
+                        return Rhino.Commands.Result.Cancel;
+                    }
+
+                    if (!PromptForDouble(doc, "Single-sheet shelf-pack budget (seconds, 0=off)", DefaultShelfPackBudgetSeconds, out shelfPackBudgetSeconds))
+                        return Rhino.Commands.Result.Cancel;
+                    if (shelfPackBudgetSeconds < 0)
+                    {
+                        RhinoApp.WriteLine("Shelf-pack budget cannot be negative.");
+                        return Rhino.Commands.Result.Cancel;
+                    }
+
+                    var gi = new Rhino.Input.Custom.GetInteger();
+                    gi.SetCommandPrompt("Random seed (0=deterministic)");
+                    gi.SetDefaultInteger(0);
+                    gi.AcceptNothing(true);
+                    var giRes = gi.Get();
+                    if (giRes == GetResult.Nothing) randomSeed = 0;
+                    else if (giRes == GetResult.Number) randomSeed = (int)gi.Number();
+                    else return Rhino.Commands.Result.Cancel;
                 }
                 else
                 {
@@ -413,7 +443,14 @@ namespace SeaNest.Commands
                         dialog.UpdateStatus(msg);
                         Application.Instance.RunIteration();
                     },
-                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg)
+                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg),
+                    RandomSeed = randomSeed,
+                    EvacuationTimeBudget = evacuationBudgetSeconds > 0
+                        ? TimeSpan.FromSeconds(evacuationBudgetSeconds)
+                        : (TimeSpan?)null,
+                    ShelfPackTimeBudget = shelfPackBudgetSeconds > 0
+                        ? TimeSpan.FromSeconds(shelfPackBudgetSeconds)
+                        : (TimeSpan?)null
                 };
                 response = engine.Nest(request);
             }
