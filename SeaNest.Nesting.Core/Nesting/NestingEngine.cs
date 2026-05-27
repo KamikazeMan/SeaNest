@@ -242,12 +242,42 @@ namespace SeaNest.Nesting.Core.Nesting
 
                 if (totalArea / sheetArea < 0.70)
                 {
+                    // Phase 27.1: classification-aware order for beam search.
+                    // StripMajor (long stringers) first so they get full edge
+                    // access on the empty sheet, then Irregulars fill the middle,
+                    // then StripMinor and Tiny gap-fill.
+                    var classes = new PartClass[nfpPolygons.Count];
+                    for (int i = 0; i < nfpPolygons.Count; i++)
+                        classes[i] = PartClassifier.Classify(nfpPolygons[i]);
+
+                    var beamOrder = new List<int>();
+
+                    beamOrder.AddRange(
+                        Enumerable.Range(0, nfpPolygons.Count)
+                            .Where(i => classes[i] == PartClass.StripMajor)
+                            .OrderByDescending(i => Math.Max(nfpPolygons[i].BoundingBox.Width, nfpPolygons[i].BoundingBox.Height)));
+
+                    beamOrder.AddRange(
+                        Enumerable.Range(0, nfpPolygons.Count)
+                            .Where(i => classes[i] == PartClass.Irregular)
+                            .OrderByDescending(i => nfpPolygons[i].AbsoluteArea));
+
+                    beamOrder.AddRange(
+                        Enumerable.Range(0, nfpPolygons.Count)
+                            .Where(i => classes[i] == PartClass.StripMinor)
+                            .OrderByDescending(i => Math.Max(nfpPolygons[i].BoundingBox.Width, nfpPolygons[i].BoundingBox.Height)));
+
+                    beamOrder.AddRange(
+                        Enumerable.Range(0, nfpPolygons.Count)
+                            .Where(i => classes[i] == PartClass.Tiny)
+                            .OrderByDescending(i => nfpPolygons[i].AbsoluteArea));
+
                     DiagnosticCallback?.Invoke(
                         $"Phase 27: starting beam retry (headroom {totalArea / sheetArea:P1}, " +
                         $"{result.SheetCount} sheets)...");
 
                     var beamResult = engine.TrySingleSheetBeamPack(
-                        BuildLargestFirstOrder(nfpPolygons),
+                        beamOrder,
                         engine.BeamRetryTimeBudget.Value,
                         engine.PlacementsPerPart,
                         engine.BeamWidth);

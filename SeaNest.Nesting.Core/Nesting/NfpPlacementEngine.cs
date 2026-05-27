@@ -961,6 +961,7 @@ namespace SeaNest.Nesting.Core.Nesting
             {
                 $"Phase 27 beam search run at {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
                 $"Parts: {partOrder.Count}, B={B}, K={K}, maxCandidates={BeamMaxCandidates}, budget={budget.TotalSeconds:F0}s",
+                $"Order: {string.Join(",", partOrder)}",
                 ""
             };
 
