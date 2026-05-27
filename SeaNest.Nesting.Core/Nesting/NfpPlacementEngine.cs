@@ -27,6 +27,9 @@ namespace SeaNest.Nesting.Core.Nesting
 
         public Action<string> DiagnosticLog { get; set; }
 
+        public bool EnableInteriorSampling { get; set; } = false;
+        public double? InteriorSamplingStep { get; set; } = null;
+
         public NfpPlacementEngine(
             NestRequest request,
             IReadOnlyList<List<OrientedPart>> orientationsByPart,
@@ -209,6 +212,8 @@ namespace SeaNest.Nesting.Core.Nesting
 
         public int MaxCandidateVertices { get; set; } = DefaultMaxCandidateVertices;
 
+        private const int MaxInteriorCandidatesPerOrientation = 512;
+
         // Phase 22b — exact-demand parallel NFP gathering.
         // Below this count, Parallel.For overhead can cost more than it saves.
         private const int ParallelNfpPlacedThreshold = 3;
@@ -369,6 +374,89 @@ namespace SeaNest.Nesting.Core.Nesting
                 }
             }
 
+            // Phase 26: interior sampling fallback. When boundary vertices all
+            // fail overlap check (best == null, overlapRejections > 0), generate
+            // grid points INSIDE the feasible region where there's actual clearance.
+            int interiorCandidateCount = 0;
+            int interiorValidCount = 0;
+            bool interiorFallbackFired = false;
+
+            if (best == null && EnableInteriorSampling && overlapRejections > 0)
+            {
+                interiorFallbackFired = true;
+                double step = InteriorSamplingStep ??
+                    Math.Max(1.0, _request.Spacing * 3.0);
+
+                foreach (var orientation in orientations)
+                {
+                    if (attemptStopwatch.Elapsed > timeBudget)
+                        break;
+
+                    var ifp = InnerFitPolygon.Compute(
+                        orientation,
+                        _request.SheetWidth,
+                        _request.SheetHeight,
+                        _request.Margin);
+
+                    if (!ifp.HasValue)
+                        continue;
+
+                    Paths64 forbidden = GetOrBuildForbiddenRegion(orientation, sheet);
+                    Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
+
+                    if (feasible.Count == 0)
+                        continue;
+
+                    var interiorPoints = SampleInteriorPoints(feasible, step);
+                    if (interiorPoints.Count == 0)
+                        continue;
+
+                    interiorCandidateCount += interiorPoints.Count;
+
+                    foreach (var pt in interiorPoints)
+                    {
+                        if (!IsSaneCandidate(pt.X, pt.Y))
+                            continue;
+
+                        var candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
+
+                        bool rejected = false;
+                        foreach (var placed in sheet.Placed)
+                        {
+                            var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
+                                placed.X, placed.Y);
+                            if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
+                            {
+                                rejected = true;
+                                break;
+                            }
+                        }
+
+                        if (rejected)
+                            continue;
+
+                        interiorValidCount++;
+
+                        var score = ScorePlacementCandidate(candidatePoly, sheet);
+
+                        if (best == null || IsBetterPlacement(score, pt.X, pt.Y, best))
+                        {
+                            best = new BestPlacement
+                            {
+                                X = pt.X,
+                                Y = pt.Y,
+                                Orientation = orientation,
+                                Score = score
+                            };
+                        }
+                    }
+                }
+            }
+
+            string interiorInfo = interiorFallbackFired
+                ? $", interior fallback: {interiorValidCount}/{interiorCandidateCount} valid"
+                : "";
+
             DiagnosticLog?.Invoke(
                 $"  Part {partIndex} sheet {sheetIdx}: " +
                 $"orient {orientationsFit}/{orientationsTried}, " +
@@ -378,7 +466,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 $"feasible {tFeasible}ms, " +
                 $"candidates {validCandidateCount}/{candidateCount}, " +
                 $"sweep {tCandidateSweep}ms, " +
-                $"overlapRejects {overlapRejections}, " +
+                $"overlapRejects {overlapRejections}{interiorInfo}, " +
                 $"best={(best != null ? $"yes orient={best.Orientation.OrientationIndex} pos=({best.X:F3},{best.Y:F3}) score={best.Score.Total:F3}" : "no")}");
 
             if (best == null)
@@ -645,6 +733,78 @@ namespace SeaNest.Nesting.Core.Nesting
             if (double.IsInfinity(x) || double.IsInfinity(y)) return false;
 
             return Math.Abs(x) <= bxLimit && Math.Abs(y) <= byLimit;
+        }
+
+        private static List<(double X, double Y)> SampleInteriorPoints(
+            Paths64 feasible,
+            double step)
+        {
+            if (feasible.Count == 0 || step <= 0)
+                return new List<(double, double)>();
+
+            long scaledStep = (long)(step * ClipperConvert.Scale);
+            if (scaledStep < 1) scaledStep = 1;
+
+            long minX = long.MaxValue, minY = long.MaxValue;
+            long maxX = long.MinValue, maxY = long.MinValue;
+
+            foreach (var path in feasible)
+            {
+                for (int i = 0; i < path.Count; i++)
+                {
+                    if (path[i].X < minX) minX = path[i].X;
+                    if (path[i].Y < minY) minY = path[i].Y;
+                    if (path[i].X > maxX) maxX = path[i].X;
+                    if (path[i].Y > maxY) maxY = path[i].Y;
+                }
+            }
+
+            if (minX >= maxX || minY >= maxY)
+                return new List<(double, double)>();
+
+            long halfStep = scaledStep / 2;
+            var result = new List<(double X, double Y)>();
+
+            for (long gy = minY + halfStep; gy <= maxY; gy += scaledStep)
+            {
+                for (long gx = minX + halfStep; gx <= maxX; gx += scaledStep)
+                {
+                    var pt = new Point64(gx, gy);
+
+                    if (IsInsideFeasibleRegion(pt, feasible))
+                    {
+                        result.Add((gx / ClipperConvert.Scale, gy / ClipperConvert.Scale));
+                    }
+
+                    if (result.Count >= MaxInteriorCandidatesPerOrientation)
+                        break;
+                }
+
+                if (result.Count >= MaxInteriorCandidatesPerOrientation)
+                    break;
+            }
+
+            return result;
+        }
+
+        private static bool IsInsideFeasibleRegion(Point64 pt, Paths64 feasible)
+        {
+            int windingSum = 0;
+
+            foreach (var path in feasible)
+            {
+                var pip = Clipper.PointInPolygon(pt, path);
+                if (pip == PointInPolygonResult.IsOn)
+                    return false;
+                if (pip == PointInPolygonResult.IsInside)
+                {
+                    double area = Clipper.Area(path);
+                    if (area > 0) windingSum++;
+                    else windingSum--;
+                }
+            }
+
+            return windingSum > 0;
         }
 
         // ------------------------------------------------------------------

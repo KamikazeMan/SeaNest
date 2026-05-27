@@ -63,6 +63,7 @@ namespace SeaNest.Commands
             double evacuationBudgetSeconds = 0.0;
             double shelfPackBudgetSeconds = 0.0;
             int randomSeed = 0;
+            bool interiorSampling = true;
             RotationStep rotStep;
             NestingAlgorithm algorithm;
             bool allowMirror;
@@ -125,6 +126,9 @@ namespace SeaNest.Commands
                     if (giRes == GetResult.Nothing) randomSeed = 0;
                     else if (giRes == GetResult.Number) randomSeed = (int)gi.Number();
                     else return Rhino.Commands.Result.Cancel;
+
+                    if (!SeaNestNestCommand.PromptForBool("Interior sampling fallback", true, out interiorSampling))
+                        return Rhino.Commands.Result.Cancel;
                 }
                 else
                 {
@@ -442,7 +446,8 @@ namespace SeaNest.Commands
                         : (TimeSpan?)null,
                     ShelfPackTimeBudget = shelfPackBudgetSeconds > 0
                         ? TimeSpan.FromSeconds(shelfPackBudgetSeconds)
-                        : (TimeSpan?)null
+                        : (TimeSpan?)null,
+                    EnableInteriorSampling = interiorSampling
                 };
                 response = engine.Nest(request);
             }

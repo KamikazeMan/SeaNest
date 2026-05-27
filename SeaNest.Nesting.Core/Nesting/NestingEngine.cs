@@ -75,6 +75,12 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         public int? RandomSeed { get; set; }
 
+        /// <summary>
+        /// Phase 26: enable interior grid sampling as a fallback when boundary
+        /// vertices all fail overlap check. Default false = off (boundary only).
+        /// </summary>
+        public bool EnableInteriorSampling { get; set; }
+
         public NestResponse Nest(NestRequest request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
@@ -135,6 +141,7 @@ namespace SeaNest.Nesting.Core.Nesting
             // Step 3: Construct placement engine.
             var engine = new NfpPlacementEngine(request, orientationsByPart, cache);
             engine.DiagnosticLog = DiagnosticCallback;
+            engine.EnableInteriorSampling = EnableInteriorSampling;
 
             // Reset the concave-aware CW filter counters so the end-of-nest
             // summary reports only this run's classifications. Wire the per-
