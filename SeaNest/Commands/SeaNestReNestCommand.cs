@@ -39,6 +39,7 @@ namespace SeaNest.Commands
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.NFP_Annealed;
         private const bool DefaultAllowMirror = true;
         private const double DefaultTimeBudgetSeconds = 30.0;
+        private const double DefaultBeamRetryBudgetSeconds = 120.0;
 
         // Phase 18 — match BrepFlattener's vertex cap so the engine never sees
         // a curve's raw chord-tessellation. Original Rhino Curve is preserved
@@ -58,6 +59,7 @@ namespace SeaNest.Commands
                 : 1.0;
 
             double sheetW, sheetH, sheetT, margin, spacing, timeBudgetSeconds;
+            double beamRetryBudgetSeconds = 0.0;
             RotationStep rotStep;
             NestingAlgorithm algorithm;
             bool allowMirror;
@@ -93,6 +95,14 @@ namespace SeaNest.Commands
                     if (timeBudgetSeconds <= 0)
                     {
                         RhinoApp.WriteLine("Time budget must be positive.");
+                        return Rhino.Commands.Result.Failure;
+                    }
+
+                    if (!SeaNestNestCommand.PromptForDouble(doc, "Beam retry budget (seconds, 0=off)", DefaultBeamRetryBudgetSeconds, out beamRetryBudgetSeconds))
+                        return Rhino.Commands.Result.Cancel;
+                    if (beamRetryBudgetSeconds < 0)
+                    {
+                        RhinoApp.WriteLine("Beam retry budget cannot be negative.");
                         return Rhino.Commands.Result.Failure;
                     }
                 }
@@ -405,7 +415,10 @@ namespace SeaNest.Commands
                         dialog.UpdateStatus(msg);
                         Application.Instance.RunIteration();
                     },
-                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg)
+                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg),
+                    BeamRetryTimeBudget = beamRetryBudgetSeconds > 0
+                        ? TimeSpan.FromSeconds(beamRetryBudgetSeconds)
+                        : (TimeSpan?)null
                 };
                 response = engine.Nest(request);
             }

@@ -54,6 +54,12 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         public Action<string> DiagnosticCallback { get; set; }
 
+        /// <summary>
+        /// Phase 27: optional time budget for single-sheet beam search retry.
+        /// Null = disabled. NFP_Annealed only.
+        /// </summary>
+        public TimeSpan? BeamRetryTimeBudget { get; set; }
+
         public NestResponse Nest(NestRequest request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
@@ -114,6 +120,8 @@ namespace SeaNest.Nesting.Core.Nesting
             // Step 3: Construct placement engine.
             var engine = new NfpPlacementEngine(request, orientationsByPart, cache);
             engine.DiagnosticLog = DiagnosticCallback;
+            if (BeamRetryTimeBudget.HasValue)
+                engine.BeamRetryTimeBudget = BeamRetryTimeBudget;
 
             // Reset the concave-aware CW filter counters so the end-of-nest
             // summary reports only this run's classifications. Wire the per-
@@ -176,6 +184,46 @@ namespace SeaNest.Nesting.Core.Nesting
                 ProgressCallback?.Invoke(0.15, "Placing parts...");
                 result = engine.PlaceAll(initialOrder);
                 ProgressCallback?.Invoke(0.95, "Finalizing...");
+            }
+
+            // Phase 27: single-sheet constrained beam retry (NFP_Annealed only).
+            if (useAnnealing && engine.BeamRetryTimeBudget.HasValue && result.SheetCount >= 2)
+            {
+                double totalArea = 0;
+                for (int i = 0; i < nfpPolygons.Count; i++)
+                    totalArea += nfpPolygons[i].AbsoluteArea;
+                double sheetArea = request.SheetWidth * request.SheetHeight;
+
+                if (totalArea / sheetArea < 0.70)
+                {
+                    DiagnosticCallback?.Invoke(
+                        $"Phase 27: starting beam retry (headroom {totalArea / sheetArea:P1}, " +
+                        $"{result.SheetCount} sheets)...");
+
+                    var beamResult = engine.TrySingleSheetBeamPack(
+                        BuildLargestFirstOrder(nfpPolygons),
+                        engine.BeamRetryTimeBudget.Value,
+                        engine.PlacementsPerPart,
+                        engine.BeamWidth);
+
+                    if (beamResult != null && beamResult.SheetCount == 1 &&
+                        beamResult.Unplaced.Count == 0)
+                    {
+                        DiagnosticCallback?.Invoke(
+                            $"Phase 27: beam retry succeeded — collapsed {result.SheetCount} sheets to 1.");
+                        result = beamResult;
+                    }
+                    else
+                    {
+                        DiagnosticCallback?.Invoke(
+                            $"Phase 27: beam retry failed, keeping {result.SheetCount}-sheet layout.");
+                    }
+                }
+                else
+                {
+                    DiagnosticCallback?.Invoke(
+                        $"Phase 27: headroom {totalArea / sheetArea:P1} >= 70%, skipping beam retry.");
+                }
             }
 
             // Step 5: Sort placements by original index for stable downstream rendering.

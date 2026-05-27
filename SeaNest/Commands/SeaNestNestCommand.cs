@@ -74,6 +74,7 @@ namespace SeaNest.Commands
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.BLF;
         private const bool DefaultAllowMirror = true;
         private const double DefaultTimeBudgetSeconds = 30.0;
+        private const double DefaultBeamRetryBudgetSeconds = 120.0;
 
         protected override Rhino.Commands.Result RunCommand(RhinoDoc doc, Rhino.Commands.RunMode mode)
         {
@@ -90,6 +91,7 @@ namespace SeaNest.Commands
             NestingAlgorithm algorithm;
             bool allowMirror;
             double timeBudgetSeconds;
+            double beamRetryBudgetSeconds = 0.0;
 
             if (!PromptForDouble(doc, "Sheet width", DefaultSheetWidthIn * inToModel, out sheetW)) return Rhino.Commands.Result.Cancel;
             if (!PromptForDouble(doc, "Sheet height", DefaultSheetHeightIn * inToModel, out sheetH)) return Rhino.Commands.Result.Cancel;
@@ -118,6 +120,14 @@ namespace SeaNest.Commands
                     if (timeBudgetSeconds <= 0)
                     {
                         RhinoApp.WriteLine("Time budget must be positive.");
+                        return Rhino.Commands.Result.Cancel;
+                    }
+
+                    if (!PromptForDouble(doc, "Beam retry budget (seconds, 0=off)", DefaultBeamRetryBudgetSeconds, out beamRetryBudgetSeconds))
+                        return Rhino.Commands.Result.Cancel;
+                    if (beamRetryBudgetSeconds < 0)
+                    {
+                        RhinoApp.WriteLine("Beam retry budget cannot be negative.");
                         return Rhino.Commands.Result.Cancel;
                     }
                 }
@@ -413,7 +423,10 @@ namespace SeaNest.Commands
                         dialog.UpdateStatus(msg);
                         Application.Instance.RunIteration();
                     },
-                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg)
+                    DiagnosticCallback = msg => RhinoApp.WriteLine(msg),
+                    BeamRetryTimeBudget = beamRetryBudgetSeconds > 0
+                        ? TimeSpan.FromSeconds(beamRetryBudgetSeconds)
+                        : (TimeSpan?)null
                 };
                 response = engine.Nest(request);
             }

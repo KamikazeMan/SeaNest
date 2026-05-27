@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Threading.Tasks;
 using Clipper2Lib;
 using SeaNest.Nesting.Core.Geometry;
@@ -26,6 +28,11 @@ namespace SeaNest.Nesting.Core.Nesting
         private readonly NfpCache _nfpCache;
 
         public Action<string> DiagnosticLog { get; set; }
+
+        public TimeSpan? BeamRetryTimeBudget { get; set; }
+        public int BeamWidth { get; set; } = 32;
+        public int PlacementsPerPart { get; set; } = 4;
+        public int BeamMaxCandidates { get; set; } = 256;
 
         public NfpPlacementEngine(
             NestRequest request,
@@ -554,6 +561,235 @@ namespace SeaNest.Nesting.Core.Nesting
         }
 
         // ------------------------------------------------------------------
+        // Phase 27: single-sheet constrained beam search
+        // ------------------------------------------------------------------
+
+        private static readonly string BeamLogPath =
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                "phase27_beam.txt");
+
+        private struct ScoredCandidate
+        {
+            public OrientedPart Orientation;
+            public double X;
+            public double Y;
+            public PlacementScore Score;
+        }
+
+        private List<ScoredCandidate> GenerateTopKCandidates(
+            int partIndex,
+            List<OrientedPart> orientations,
+            SheetState sheet,
+            int maxCandidates,
+            int topK)
+        {
+            var all = new List<ScoredCandidate>();
+
+            foreach (var orientation in orientations)
+            {
+                var ifp = InnerFitPolygon.Compute(
+                    orientation,
+                    _request.SheetWidth,
+                    _request.SheetHeight,
+                    _request.Margin);
+
+                if (!ifp.HasValue)
+                    continue;
+
+                Paths64 forbidden = GetOrBuildForbiddenRegion(orientation, sheet);
+                Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
+
+                if (feasible.Count == 0)
+                    continue;
+
+                var candidates = FindCandidateVertices(feasible, maxCandidates);
+
+                foreach (var cand in candidates)
+                {
+                    if (!IsSaneCandidate(cand.X, cand.Y))
+                        continue;
+
+                    var candidatePoly = orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
+
+                    bool rejected = false;
+                    foreach (var placed in sheet.Placed)
+                    {
+                        var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
+                            placed.X, placed.Y);
+                        if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
+                        {
+                            rejected = true;
+                            break;
+                        }
+                    }
+
+                    if (rejected)
+                        continue;
+
+                    var score = ScorePlacementCandidate(candidatePoly, sheet);
+                    all.Add(new ScoredCandidate
+                    {
+                        Orientation = orientation,
+                        X = cand.X,
+                        Y = cand.Y,
+                        Score = score
+                    });
+                }
+            }
+
+            all.Sort((a, b) => a.Score.Total.CompareTo(b.Score.Total));
+            if (all.Count > topK)
+                all.RemoveRange(topK, all.Count - topK);
+
+            return all;
+        }
+
+        private sealed class BeamState
+        {
+            public SheetState Sheet;
+            public List<PlacementResult> Placements;
+            public double TotalScore;
+            public double MaxUsedTop;
+            public double MaxUsedRight;
+        }
+
+        public NestResult TrySingleSheetBeamPack(
+            IReadOnlyList<int> partOrder,
+            TimeSpan budget,
+            int K,
+            int B)
+        {
+            if (partOrder == null || partOrder.Count == 0)
+                return null;
+
+            var sw = Stopwatch.StartNew();
+            var log = new List<string>
+            {
+                $"Phase 27 beam search run at {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
+                $"Parts: {partOrder.Count}, B={B}, K={K}, maxCandidates={BeamMaxCandidates}, budget={budget.TotalSeconds:F0}s",
+                ""
+            };
+
+            var initialState = new BeamState
+            {
+                Sheet = new SheetState(),
+                Placements = new List<PlacementResult>(),
+                TotalScore = 0,
+                MaxUsedTop = 0,
+                MaxUsedRight = 0
+            };
+
+            var beam = new List<BeamState> { initialState };
+
+            for (int step = 0; step < partOrder.Count; step++)
+            {
+                if (sw.Elapsed >= budget)
+                {
+                    log.Add($"Part {partOrder[step]} (step {step}): time budget exceeded at {sw.ElapsedMilliseconds}ms. Aborting.");
+                    FlushBeamLog(log);
+                    return null;
+                }
+
+                int partIndex = partOrder[step];
+                var orientations = _orientationsByPart[partIndex];
+                var nextBeam = new List<BeamState>();
+
+                foreach (var state in beam)
+                {
+                    var topK = GenerateTopKCandidates(
+                        partIndex, orientations, state.Sheet,
+                        BeamMaxCandidates, K);
+
+                    foreach (var cand in topK)
+                    {
+                        var newSheet = state.Sheet.Clone();
+                        newSheet.Placed.Add(new PlacedItem(cand.Orientation, cand.X, cand.Y));
+                        newSheet.ForbiddenByOrientation.Clear();
+
+                        var placedPoly = cand.Orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
+
+                        double rotRad = cand.Orientation.RotationDeg * Math.PI / 180.0;
+                        var sourcePoly = _request.Polygons[partIndex];
+                        var srcBBox = sourcePoly.BoundingBox;
+                        var rotatedNorm = sourcePoly.MoveToOrigin();
+                        if (Math.Abs(cand.Orientation.RotationDeg) > 0.01)
+                            rotatedNorm = rotatedNorm.RotateAround(Point2D.Origin, rotRad);
+                        var rotBBox = rotatedNorm.BoundingBox;
+
+                        var step1 = Transform2D.Translation(-srcBBox.MinX, -srcBBox.MinY);
+                        var step2 = Transform2D.RotationDegrees(cand.Orientation.RotationDeg);
+                        var step3 = Transform2D.Translation(-rotBBox.MinX, -rotBBox.MinY);
+                        var step4 = Transform2D.Translation(cand.X, cand.Y);
+                        var combined = step1.Then(step2).Then(step3).Then(step4);
+
+                        var newPlacements = new List<PlacementResult>(state.Placements);
+                        newPlacements.Add(new PlacementResult(
+                            originalIndex: partIndex,
+                            sheet: 0,
+                            transform: combined,
+                            rotationDeg: cand.Orientation.RotationDeg,
+                            isMirrored: cand.Orientation.IsMirrored,
+                            sourceBBoxMinX: srcBBox.MinX,
+                            sourceBBoxMaxX: srcBBox.MaxX,
+                            placedPolygon: placedPoly));
+
+                        var placedBox = placedPoly.BoundingBox;
+                        double newMaxTop = Math.Max(state.MaxUsedTop, placedBox.MaxY);
+                        double newMaxRight = Math.Max(state.MaxUsedRight, placedBox.MaxX);
+
+                        nextBeam.Add(new BeamState
+                        {
+                            Sheet = newSheet,
+                            Placements = newPlacements,
+                            TotalScore = state.TotalScore + cand.Score.Total,
+                            MaxUsedTop = newMaxTop,
+                            MaxUsedRight = newMaxRight
+                        });
+                    }
+                }
+
+                if (nextBeam.Count == 0)
+                {
+                    log.Add($"Part {partIndex} (step {step}): beam dropped to zero — no state could place on single sheet. Aborting.");
+                    FlushBeamLog(log);
+                    return null;
+                }
+
+                nextBeam.Sort((a, b) =>
+                {
+                    int cmp = a.TotalScore.CompareTo(b.TotalScore);
+                    if (cmp != 0) return cmp;
+                    cmp = a.MaxUsedTop.CompareTo(b.MaxUsedTop);
+                    if (cmp != 0) return cmp;
+                    return a.MaxUsedRight.CompareTo(b.MaxUsedRight);
+                });
+
+                if (nextBeam.Count > B)
+                    nextBeam.RemoveRange(B, nextBeam.Count - B);
+
+                log.Add($"Part {partIndex} (step {step}): beam {beam.Count} -> branches {beam.Count * K} -> pruned {nextBeam.Count}, " +
+                        $"best score {nextBeam[0].TotalScore:F1}, elapsed {sw.ElapsedMilliseconds}ms");
+
+                beam = nextBeam;
+            }
+
+            var best = beam[0];
+            log.Add("");
+            log.Add($"Phase 27: beam search succeeded — all {partOrder.Count} parts on 1 sheet. " +
+                    $"Total score {best.TotalScore:F1}, elapsed {sw.ElapsedMilliseconds}ms.");
+            FlushBeamLog(log);
+
+            return new NestResult(1, best.Placements, new List<int>());
+        }
+
+        private static void FlushBeamLog(List<string> lines)
+        {
+            try { File.WriteAllLines(BeamLogPath, lines); }
+            catch { /* best effort */ }
+        }
+
+        // ------------------------------------------------------------------
         // Smart candidate scoring
         // ------------------------------------------------------------------
 
@@ -786,6 +1022,13 @@ namespace SeaNest.Nesting.Core.Nesting
 
             public Dictionary<int, Paths64> ForbiddenByOrientation { get; }
                 = new Dictionary<int, Paths64>();
+
+            public SheetState Clone()
+            {
+                var copy = new SheetState();
+                copy.Placed.AddRange(this.Placed);
+                return copy;
+            }
         }
 
         private readonly struct PlacedItem
