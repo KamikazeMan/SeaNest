@@ -290,6 +290,15 @@ namespace SeaNest.Nesting.Core.Nesting
                     }
                     engine.CriticalPartIndices = criticals;
 
+                    // Phase 28.2: pass Irregular indices for MRV reordering.
+                    var irregularSet = new HashSet<int>();
+                    for (int i = 0; i < nfpPolygons.Count; i++)
+                    {
+                        if (classes[i] == PartClass.Irregular)
+                            irregularSet.Add(i);
+                    }
+                    engine.IrregularPartIndices = irregularSet;
+
                     DiagnosticCallback?.Invoke(
                         $"Phase 27: starting beam retry (headroom {totalArea / sheetArea:P1}, " +
                         $"{result.SheetCount} sheets, {criticals.Count} critical parts)...");
