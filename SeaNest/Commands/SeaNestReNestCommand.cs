@@ -41,6 +41,7 @@ namespace SeaNest.Commands
         private const double DefaultTimeBudgetSeconds = 30.0;
         private const double DefaultEvacuationBudgetSeconds = 60.0;
         private const double DefaultShelfPackBudgetSeconds = 60.0;
+        private const double DefaultBeamRetryBudgetSeconds = 120.0;
 
         // Phase 18 — match BrepFlattener's vertex cap so the engine never sees
         // a curve's raw chord-tessellation. Original Rhino Curve is preserved
@@ -64,6 +65,7 @@ namespace SeaNest.Commands
             double shelfPackBudgetSeconds = 0.0;
             int randomSeed = 0;
             bool interiorSampling = true;
+            double beamRetryBudgetSeconds = 0.0;
             RotationStep rotStep;
             NestingAlgorithm algorithm;
             bool allowMirror;
@@ -129,6 +131,14 @@ namespace SeaNest.Commands
 
                     if (!SeaNestNestCommand.PromptForBool("Interior sampling fallback", true, out interiorSampling))
                         return Rhino.Commands.Result.Cancel;
+
+                    if (!SeaNestNestCommand.PromptForDouble(doc, "Beam retry budget (seconds, 0=off)", DefaultBeamRetryBudgetSeconds, out beamRetryBudgetSeconds))
+                        return Rhino.Commands.Result.Cancel;
+                    if (beamRetryBudgetSeconds < 0)
+                    {
+                        RhinoApp.WriteLine("Beam retry budget cannot be negative.");
+                        return Rhino.Commands.Result.Failure;
+                    }
                 }
                 else
                 {
@@ -447,7 +457,10 @@ namespace SeaNest.Commands
                     ShelfPackTimeBudget = shelfPackBudgetSeconds > 0
                         ? TimeSpan.FromSeconds(shelfPackBudgetSeconds)
                         : (TimeSpan?)null,
-                    EnableInteriorSampling = interiorSampling
+                    EnableInteriorSampling = interiorSampling,
+                    BeamRetryTimeBudget = beamRetryBudgetSeconds > 0
+                        ? TimeSpan.FromSeconds(beamRetryBudgetSeconds)
+                        : (TimeSpan?)null
                 };
                 response = engine.Nest(request);
             }
