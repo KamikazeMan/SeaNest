@@ -888,12 +888,14 @@ namespace SeaNest.Nesting.Core.Nesting
             public PlacementScore Score;
         }
 
-        private int CountValidPlacements(
-            int partIndex,
-            SheetState sheet,
-            int cap)
+        // Phase 28.2.3: shared geometry pipeline (IFP -> forbidden region ->
+        // feasible region), computed in one place so CountValidPlacements and
+        // MeasureFeasibleArea do not duplicate it. Yields per orientation in
+        // orientation order; orientations with no IFP or an empty feasible
+        // region are skipped.
+        private IEnumerable<(OrientedPart Orientation, Paths64 Feasible)>
+            EnumerateFeasibleRegions(int partIndex, SheetState sheet)
         {
-            int count = 0;
             var orientations = _orientationsByPart[partIndex];
 
             foreach (var orientation in orientations)
@@ -913,6 +915,20 @@ namespace SeaNest.Nesting.Core.Nesting
                 if (feasible.Count == 0)
                     continue;
 
+                yield return (orientation, feasible);
+            }
+        }
+
+        private int CountValidPlacements(
+            int partIndex,
+            SheetState sheet,
+            int cap)
+        {
+            int count = 0;
+
+            foreach (var (orientation, feasible) in
+                EnumerateFeasibleRegions(partIndex, sheet))
+            {
                 var candidates = FindCandidateVertices(feasible, BeamMaxCandidates);
 
                 foreach (var cand in candidates)
@@ -984,6 +1000,28 @@ namespace SeaNest.Nesting.Core.Nesting
             SheetState sheet)
         {
             return CountValidPlacements(partIndex, sheet, 1) > 0;
+        }
+
+        // Phase 28.2.3: feasible-region area metric for MRV decisions. Sums the
+        // signed Clipper area of every feasible-region polygon across all
+        // orientations and returns the total in model square units. Unlike
+        // CountValidPlacements this neither enumerates candidate vertices nor
+        // tests overlaps, so it always discriminates (continuous measure) and
+        // is cheaper to compute.
+        private double MeasureFeasibleArea(
+            int partIndex,
+            SheetState sheet)
+        {
+            double scaledArea = 0;
+
+            foreach (var (_, feasible) in
+                EnumerateFeasibleRegions(partIndex, sheet))
+            {
+                foreach (var path in feasible)
+                    scaledArea += Clipper.Area(path);
+            }
+
+            return scaledArea / (ClipperConvert.Scale * ClipperConvert.Scale);
         }
 
         private List<ScoredCandidate> GenerateTopKCandidates(
@@ -1191,30 +1229,29 @@ namespace SeaNest.Nesting.Core.Nesting
 
                     if (unplacedIrregulars.Count >= 2 && beam.Count > 0)
                     {
-                        const int mrvCap = 1000;
                         int bestIdx = unplacedIrregulars[0];
-                        int bestMinCount = int.MaxValue;
+                        double bestMinArea = double.MaxValue;
                         double bestBBoxArea = 0;
                         var mrvDetails = new List<string>();
 
                         foreach (int ui in unplacedIrregulars)
                         {
-                            int minCount = int.MaxValue;
+                            double minArea = double.MaxValue;
                             foreach (var state in beam)
                             {
-                                int c = CountValidPlacements(ui, state.Sheet, mrvCap);
-                                if (c < minCount) minCount = c;
+                                double a = MeasureFeasibleArea(ui, state.Sheet);
+                                if (a < minArea) minArea = a;
                             }
 
                             var bb = _request.Polygons[ui].BoundingBox;
                             double bboxArea = bb.Width * bb.Height;
-                            mrvDetails.Add($"{ui}={minCount}");
+                            mrvDetails.Add($"{ui}={minArea:F1}");
 
-                            if (minCount < bestMinCount ||
-                                (minCount == bestMinCount && bboxArea > bestBBoxArea))
+                            if (minArea < bestMinArea ||
+                                (minArea == bestMinArea && bboxArea > bestBBoxArea))
                             {
                                 bestIdx = ui;
-                                bestMinCount = minCount;
+                                bestMinArea = minArea;
                                 bestBBoxArea = bboxArea;
                             }
                         }
