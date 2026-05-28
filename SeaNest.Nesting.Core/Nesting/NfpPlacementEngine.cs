@@ -270,6 +270,11 @@ namespace SeaNest.Nesting.Core.Nesting
         private const double ContactRewardWeight = 30.0;
         private const double LooseIslandPenaltyWeight = 4.0;
 
+        // Phase 28.3: weight on regret (feasible-area lost by unplaced critical
+        // parts when the current part's candidate is placed). Matches
+        // UsedAreaWeight as a starting point; tune later.
+        private const double RegretWeight = 100.0;
+
         // ------------------------------------------------------------------
         // Per-sheet placement
         // ------------------------------------------------------------------
@@ -1172,6 +1177,10 @@ namespace SeaNest.Nesting.Core.Nesting
             public double TotalScore;
             public double MaxUsedTop;
             public double MaxUsedRight;
+
+            // Phase 28.3: weighted regret term applied to the candidate that
+            // produced this state. Diagnostic only — not used by the sort.
+            public double LastRegret;
         }
 
         public NestResult TrySingleSheetBeamPack(
@@ -1307,6 +1316,25 @@ namespace SeaNest.Nesting.Core.Nesting
                         BeamMaxCandidates, K,
                         out int bValid, out int iValid);
 
+                    // Phase 28.3: feasible area of each unplaced critical part
+                    // BEFORE placing the current part. Independent of which
+                    // candidate is chosen, so compute once per beam state.
+                    double[] criticalAreaBefore = null;
+                    if (unplacedCriticals != null)
+                    {
+                        criticalAreaBefore = new double[unplacedCriticals.Count];
+                        for (int c = 0; c < unplacedCriticals.Count; c++)
+                            criticalAreaBefore[c] =
+                                MeasureFeasibleArea(unplacedCriticals[c], state.Sheet);
+                    }
+
+                    // Phase 28.3: track this state's best (lowest-adjusted)
+                    // surviving candidate for the diagnostic log.
+                    bool regretLogged = false;
+                    double bestRawScore = 0;
+                    double bestRegretTerm = 0;
+                    double bestAdjusted = double.MaxValue;
+
                     foreach (var cand in topK)
                     {
                         var newSheet = state.Sheet.Clone();
@@ -1334,6 +1362,24 @@ namespace SeaNest.Nesting.Core.Nesting
 
                         if (prunedByFD)
                             continue;
+
+                        // Phase 28.3: regret — total feasible area the unplaced
+                        // critical parts lose when this candidate is placed.
+                        // Future-domain pruning above already populated newSheet's
+                        // forbidden cache for the criticals, so the "after"
+                        // measurements mostly reuse it.
+                        double regretTerm = 0;
+                        if (criticalAreaBefore != null)
+                        {
+                            double totalRegret = 0;
+                            for (int c = 0; c < unplacedCriticals.Count; c++)
+                            {
+                                double after =
+                                    MeasureFeasibleArea(unplacedCriticals[c], newSheet);
+                                totalRegret += criticalAreaBefore[c] - after;
+                            }
+                            regretTerm = RegretWeight * totalRegret;
+                        }
 
                         var placedPoly = cand.Orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
 
@@ -1370,15 +1416,35 @@ namespace SeaNest.Nesting.Core.Nesting
                         {
                             Sheet = newSheet,
                             Placements = newPlacements,
-                            TotalScore = state.TotalScore + cand.Score.Total,
+                            TotalScore = state.TotalScore + cand.Score.Total + regretTerm,
                             MaxUsedTop = newMaxTop,
-                            MaxUsedRight = newMaxRight
+                            MaxUsedRight = newMaxRight,
+                            LastRegret = regretTerm
                         });
+
+                        // Phase 28.3: remember this state's best surviving
+                        // candidate for the per-state diagnostic line.
+                        double adjustedIncremental = cand.Score.Total + regretTerm;
+                        if (adjustedIncremental < bestAdjusted)
+                        {
+                            bestAdjusted = adjustedIncremental;
+                            bestRawScore = cand.Score.Total;
+                            bestRegretTerm = regretTerm;
+                            regretLogged = true;
+                        }
                     }
 
                     if (EnableInteriorSampling && (bValid > 0 || iValid > 0))
                     {
                         log.Add($"  Part {partIndex} state {stateIdx}: boundary={bValid} valid, interior={iValid} valid, topK={topK.Count}");
+                    }
+
+                    // Phase 28.3: per-state regret diagnostic.
+                    if (criticalAreaBefore != null && regretLogged)
+                    {
+                        log.Add($"  Part {partIndex} state {stateIdx}: best candidate " +
+                                $"raw_score={bestRawScore:F1}, regret={bestRegretTerm:F1}, " +
+                                $"adjusted={bestAdjusted:F1}, picked from K={topK.Count}");
                     }
                     stateIdx++;
                 }
@@ -1411,8 +1477,14 @@ namespace SeaNest.Nesting.Core.Nesting
                     nextBeam.RemoveRange(B, nextBeam.Count - B);
 
                 string fdInfo = prunedByFutureDomain > 0 ? $" (futureDomain={prunedByFutureDomain})" : "";
+
+                // Phase 28.3: average weighted regret across surviving states.
+                double avgRegret = 0;
+                foreach (var s in nextBeam) avgRegret += s.LastRegret;
+                avgRegret /= nextBeam.Count;
+
                 log.Add($"Part {partIndex} (step {step}): beam {beam.Count} -> branches {beam.Count * K} -> survived {nextBeam.Count}{fdInfo}, " +
-                        $"best score {nextBeam[0].TotalScore:F1}, elapsed {sw.ElapsedMilliseconds}ms");
+                        $"best score {nextBeam[0].TotalScore:F1}, avgRegret {avgRegret:F1}, elapsed {sw.ElapsedMilliseconds}ms");
 
                 beam = nextBeam;
             }
