@@ -241,6 +241,21 @@ namespace SeaNest.Nesting.Core.Nesting
         // Cap worker count so Rhino remains responsive and Clipper/GC pressure stays sane.
         private const int MaxParallelNfpWorkers = 8;
 
+        // Phase 28.1.5 (TEMPORARY DIAGNOSTIC): when true, the forbidden-region
+        // build always runs serially, bypassing BuildForbiddenRegionParallel.
+        // Used to localize beam-search nondeterminism: run the benchmark twice
+        // with this true (serial) and twice with it false (parallel), diff the
+        // logs. If serial is deterministic and parallel isn't, the parallel
+        // path is the source despite the clean Lazy/Clipper code review.
+        //
+        // Default is TRUE for the current diagnostic run. To test the parallel
+        // path, set the SEANEST_PARALLEL_FORBIDDEN environment variable to "1"
+        // (any non-null/non-empty value flips this to false → parallel).
+        // Remove this toggle entirely once the source is localized.
+        private static readonly bool ForceSerialForbiddenRegion =
+            string.IsNullOrEmpty(
+                Environment.GetEnvironmentVariable("SEANEST_PARALLEL_FORBIDDEN"));
+
         private const double CandidateDuplicateTolerance = 0.001;
 
         private const double ContactTolerance = 0.02;
@@ -587,7 +602,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             Paths64 allNfps;
 
-            if (sheet.Placed.Count >= ParallelNfpPlacedThreshold)
+            if (!ForceSerialForbiddenRegion && sheet.Placed.Count >= ParallelNfpPlacedThreshold)
             {
                 allNfps = BuildForbiddenRegionParallel(candidate, sheet);
             }
@@ -1069,7 +1084,29 @@ namespace SeaNest.Nesting.Core.Nesting
                 }
             }
 
-            all.Sort((a, b) => a.Score.Total.CompareTo(b.Score.Total));
+            // Phase 28.1.5: total-order sort. List.Sort (introsort) is
+            // unstable, so any ties at Score.Total would leave the order of
+            // distinct candidates undefined and break byte-identical output.
+            // The ladder below is provably total for distinct candidates:
+            // two candidates with identical orientation index AND identical
+            // X AND identical Y (full double precision) are the same physical
+            // placement, so comparing equal is correct.
+            all.Sort((a, b) =>
+            {
+                int cmp = a.Score.Total.CompareTo(b.Score.Total);
+                if (cmp != 0) return cmp;
+                cmp = a.Score.UsedArea.CompareTo(b.Score.UsedArea);
+                if (cmp != 0) return cmp;
+                cmp = a.Score.UsedTop.CompareTo(b.Score.UsedTop);
+                if (cmp != 0) return cmp;
+                cmp = a.Score.UsedRight.CompareTo(b.Score.UsedRight);
+                if (cmp != 0) return cmp;
+                cmp = a.Orientation.OrientationIndex.CompareTo(b.Orientation.OrientationIndex);
+                if (cmp != 0) return cmp;
+                cmp = a.X.CompareTo(b.X);
+                if (cmp != 0) return cmp;
+                return a.Y.CompareTo(b.Y);
+            });
             if (all.Count > topK)
                 all.RemoveRange(topK, all.Count - topK);
 
@@ -1243,13 +1280,21 @@ namespace SeaNest.Nesting.Core.Nesting
                     return null;
                 }
 
+                // Phase 28.1.5: total-order sort. After the three score keys,
+                // tiebreak on the placement sequence (OriginalIndex, X, Y of
+                // each placement in placement order, compared lexically). Two
+                // states with identical placements in identical positions are
+                // genuinely the same state and may compare equal — that's
+                // correct, not a determinism leak.
                 nextBeam.Sort((a, b) =>
                 {
                     int cmp = a.TotalScore.CompareTo(b.TotalScore);
                     if (cmp != 0) return cmp;
                     cmp = a.MaxUsedTop.CompareTo(b.MaxUsedTop);
                     if (cmp != 0) return cmp;
-                    return a.MaxUsedRight.CompareTo(b.MaxUsedRight);
+                    cmp = a.MaxUsedRight.CompareTo(b.MaxUsedRight);
+                    if (cmp != 0) return cmp;
+                    return ComparePlacementSequence(a.Placements, b.Placements);
                 });
 
                 if (nextBeam.Count > B)
@@ -1275,6 +1320,32 @@ namespace SeaNest.Nesting.Core.Nesting
         {
             try { File.WriteAllLines(BeamLogPath, lines); }
             catch { /* best effort */ }
+        }
+
+        // Phase 28.1.5: deterministic lexical comparison of two placement
+        // sequences. Compares element-by-element on (OriginalIndex, placed
+        // bbox MinX, placed bbox MinY, RotationDeg). Shorter sequence sorts
+        // first if it's a prefix. Returns 0 only when the sequences are
+        // genuinely identical (same parts, same positions, same order).
+        private static int ComparePlacementSequence(
+            List<PlacementResult> a, List<PlacementResult> b)
+        {
+            int n = Math.Min(a.Count, b.Count);
+            for (int i = 0; i < n; i++)
+            {
+                int cmp = a[i].OriginalIndex.CompareTo(b[i].OriginalIndex);
+                if (cmp != 0) return cmp;
+
+                var ba = a[i].PlacedPolygon.BoundingBox;
+                var bb = b[i].PlacedPolygon.BoundingBox;
+                cmp = ba.MinX.CompareTo(bb.MinX);
+                if (cmp != 0) return cmp;
+                cmp = ba.MinY.CompareTo(bb.MinY);
+                if (cmp != 0) return cmp;
+                cmp = a[i].RotationDeg.CompareTo(b[i].RotationDeg);
+                if (cmp != 0) return cmp;
+            }
+            return a.Count.CompareTo(b.Count);
         }
         // ------------------------------------------------------------------
         // Smart candidate scoring
