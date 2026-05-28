@@ -1191,7 +1191,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
                     if (unplacedIrregulars.Count >= 2 && beam.Count > 0)
                     {
-                        const int mrvCap = 10;
+                        const int mrvCap = 200;
                         int bestIdx = unplacedIrregulars[0];
                         int bestMinCount = int.MaxValue;
                         double bestBBoxArea = 0;
