@@ -31,6 +31,12 @@ namespace SeaNest.Nesting.Core.Nesting
         // resolved once from SEANEST_REGRET_WEIGHT at construction.
         private readonly double _regretWeight;
 
+        // Phase 30 increment 3: frame-nester weights resolved once at
+        // construction from env vars (see Default* constants below).
+        private readonly double _frameContactWeight;
+        private readonly double _frameBboxWeight;
+        private readonly double _contactInflateMultiplier;
+
         public Action<string> DiagnosticLog { get; set; }
 
         public bool EnableInteriorSampling { get; set; } = false;
@@ -60,15 +66,19 @@ namespace SeaNest.Nesting.Core.Nesting
             _orientationsByPart = orientationsByPart ?? throw new ArgumentNullException(nameof(orientationsByPart));
             _nfpCache = nfpCache ?? throw new ArgumentNullException(nameof(nfpCache));
 
-            string regretRaw = Environment.GetEnvironmentVariable("SEANEST_REGRET_WEIGHT");
-            _regretWeight =
+            double EnvDouble(string name, double fallback) =>
                 double.TryParse(
-                    regretRaw,
+                    Environment.GetEnvironmentVariable(name),
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture,
-                    out double parsedRegret)
-                    ? parsedRegret
-                    : DefaultRegretWeight;
+                    out double parsed)
+                    ? parsed
+                    : fallback;
+
+            _regretWeight = EnvDouble("SEANEST_REGRET_WEIGHT", DefaultRegretWeight);
+            _frameContactWeight = EnvDouble("SEANEST_FRAME_CONTACT_W", DefaultFrameContactWeight);
+            _frameBboxWeight = EnvDouble("SEANEST_FRAME_BBOX_W", DefaultFrameBboxWeight);
+            _contactInflateMultiplier = EnvDouble("SEANEST_FRAME_INFLATE_MULT", DefaultContactInflateMultiplier);
         }
 
         public NestResult PlaceAll(IReadOnlyList<int> partOrder)
@@ -264,10 +274,11 @@ namespace SeaNest.Nesting.Core.Nesting
                      string.Join(",", pending));
 
             // Phase 30 increment 3 state.
-            double inflateDelta = ContactInflateMultiplier * _request.Spacing;
-            diag.Add($"Contact metric: w_bbox={FrameBboxWeight:F1}, " +
-                     $"w_contact={FrameContactWeight:F1}, " +
-                     $"inflate delta={inflateDelta:F3} ({ContactInflateMultiplier:F1}x spacing).");
+            double inflateDelta = _contactInflateMultiplier * _request.Spacing;
+            diag.Add($"Contact metric: w_bbox={_frameBboxWeight:F2}, " +
+                     $"w_contact={_frameContactWeight:F2}, " +
+                     $"inflate delta={inflateDelta:F3} ({_contactInflateMultiplier:F2}x spacing) " +
+                     "[env-tunable: SEANEST_FRAME_BBOX_W / _CONTACT_W / _INFLATE_MULT].");
 
             // Inflated-canonical paths cached per orientation (translation just
             // shifts Path64 points; the dilated shape itself doesn't change).
@@ -295,6 +306,14 @@ namespace SeaNest.Nesting.Core.Nesting
                 int bestOrientIdx = int.MaxValue;
                 OrientedPart bestOrient = null;
                 double bestContact = 0.0, bestBboxGrow = 0.0;
+
+                // Diagnosis: highest contact area achievable by any VALID
+                // (non-overlapping) candidate per pending frame this step,
+                // independent of score. If this is large but the committed
+                // contact is tiny, the bbox term is suppressing high-contact
+                // positions (weight problem); if this is also tiny, no position
+                // achieves real cradling (contact-formulation/geometry problem).
+                var bestAvailContact = new Dictionary<int, double>();
 
                 foreach (int f in pending)
                 {
@@ -383,8 +402,14 @@ namespace SeaNest.Nesting.Core.Nesting
                                 }
                             }
 
-                            double score = FrameBboxWeight * bboxGrow
-                                         - FrameContactWeight * contactArea;
+                            // Track the best contact achievable by any valid
+                            // candidate for this frame (score-independent).
+                            if (!bestAvailContact.TryGetValue(f, out double prevAvail)
+                                || contactArea > prevAvail)
+                                bestAvailContact[f] = contactArea;
+
+                            double score = _frameBboxWeight * bboxGrow
+                                         - _frameContactWeight * contactArea;
 
                             if (IsBetterFramePlacement(
                                     score, fo.OrientationIndex, cand.Y, cand.X, f,
@@ -464,10 +489,12 @@ namespace SeaNest.Nesting.Core.Nesting
                 }
                 curHalfPerim = (curMaxX - curMinX) + (curMaxY - curMinY);
 
+                double availForBest = bestAvailContact.TryGetValue(bestFrame, out double av) ? av : 0.0;
                 diag.Add($"  Placed frame {bestFrame} at ({bestX:F3},{bestY:F3}) " +
                          $"orient={bestOrient.OrientationIndex} rot={bestOrient.RotationDeg:F0} " +
-                         $"mirror={bestOrient.IsMirrored} [contact={bestContact:F2} " +
-                         $"bboxGrow={bestBboxGrow:F2} score={bestScore:F2}]");
+                         $"mirror={bestOrient.IsMirrored} [committed contact={bestContact:F2} " +
+                         $"bboxGrow={bestBboxGrow:F2} score={bestScore:F2}; " +
+                         $"best available contact this frame={availForBest:F2}]");
                 DiagnosticLog?.Invoke(
                     $"Coordinated frames: placed frame {bestFrame} " +
                     $"({committed.Count} of {totalFrames}).");
@@ -619,15 +646,16 @@ namespace SeaNest.Nesting.Core.Nesting
 
         // Phase 30 increment 3: frame-nester contact metric weights and inflate
         // delta multiplier. Score (lower=better) = w_bbox*bboxGrow - w_contact*contactArea
-        // so contact dominates bbox-growth (factor 10x) — the cradling reward.
-        // Inflate delta = multiplier * spacing so a candidate sitting at the
-        // NFP boundary (i.e. spacing-distance from a placed frame) actually
-        // overlaps the placed union by ~length × spacing of profile contact.
-        // Multiplier=2 picks that cleanly; at 1x the inflated edge just kisses
-        // the boundary and contact area collapses to ~0. Tunable starting values.
-        private const double FrameContactWeight = 10.0;
-        private const double FrameBboxWeight = 1.0;
-        private const double ContactInflateMultiplier = 2.0;
+        // so contact dominates bbox-growth — the cradling reward. Inflate delta
+        // = multiplier * spacing so a candidate sitting at the NFP boundary
+        // (spacing-distance from a placed frame) overlaps the placed union by
+        // ~length × spacing of profile contact. These defaults are overridden at
+        // construction by SEANEST_FRAME_CONTACT_W / SEANEST_FRAME_BBOX_W /
+        // SEANEST_FRAME_INFLATE_MULT so David can sweep without recompiling
+        // (same pattern as SEANEST_REGRET_WEIGHT).
+        private const double DefaultFrameContactWeight = 10.0;
+        private const double DefaultFrameBboxWeight = 1.0;
+        private const double DefaultContactInflateMultiplier = 2.0;
 
         // ------------------------------------------------------------------
         // Per-sheet placement
