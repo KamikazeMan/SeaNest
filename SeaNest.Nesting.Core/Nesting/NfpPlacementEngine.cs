@@ -259,7 +259,8 @@ namespace SeaNest.Nesting.Core.Nesting
                 return a.CompareTo(b);
             });
 
-            diag.Add($"Frames to place ({pending.Count}), largest-first: " +
+            int totalFrames = pending.Count;
+            diag.Add($"Frames to place ({totalFrames}), largest-first: " +
                      string.Join(",", pending));
 
             // Greedy loop: each iteration commits the single best valid (frame,
@@ -269,6 +270,9 @@ namespace SeaNest.Nesting.Core.Nesting
             // pending order, decided by the (Y,X,frameIndex) tiebreak).
             while (pending.Count > 0)
             {
+                DiagnosticLog?.Invoke(
+                    $"Coordinated frames: placing frame {committed.Count + 1} of {totalFrames}...");
+
                 int bestFrame = -1;
                 double bestY = double.MaxValue, bestX = double.MaxValue;
                 OrientedPart bestOrient = null;
@@ -323,12 +327,43 @@ namespace SeaNest.Nesting.Core.Nesting
                     break;
                 }
 
+                // HARD GATE (defense in depth): re-validate the chosen position
+                // against every committed frame with the FULL-RESOLUTION polygon
+                // before committing. Scoring already rejected overlapping
+                // candidates, so this should never trigger — but it guarantees an
+                // overlapping frame can never be committed regardless of how
+                // candidates are generated. On the (unexpected) failure the frame
+                // is spilled, never placed at an overlapping position.
+                var bestPoly = bestOrient.CanonicalPolygon.Translate(bestX, bestY);
+                bool revalidateOverlap = false;
+                foreach (var c in committed)
+                {
+                    if (OverlapChecker.Overlaps(
+                            bestPoly,
+                            c.Orient.CanonicalPolygon.Translate(c.X, c.Y),
+                            OverlapTolerance))
+                    {
+                        revalidateOverlap = true;
+                        break;
+                    }
+                }
+                if (revalidateOverlap)
+                {
+                    diag.Add($"  Frame {bestFrame} best candidate ({bestX:F3},{bestY:F3}) " +
+                             "FAILED commit re-validation — spilling (not committed).");
+                    pending.Remove(bestFrame);
+                    continue;
+                }
+
                 committed.Add((bestFrame, bestOrient, bestX, bestY));
                 sheet.Placed.Add(new PlacedItem(bestOrient, bestX, bestY));
                 sheet.ForbiddenByOrientation.Clear();
                 pending.Remove(bestFrame);
                 diag.Add($"  Placed frame {bestFrame} at ({bestX:F3},{bestY:F3}) " +
                          $"[placeholder score Y={bestY:F3}, X={bestX:F3}]");
+                DiagnosticLog?.Invoke(
+                    $"Coordinated frames: placed frame {bestFrame} " +
+                    $"({committed.Count} of {totalFrames}).");
             }
 
             if (pending.Count > 0)

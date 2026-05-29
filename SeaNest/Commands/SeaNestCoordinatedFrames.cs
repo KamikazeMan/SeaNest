@@ -157,6 +157,15 @@ namespace SeaNest.Commands
                 var cache = new NfpCache(request.Spacing);
                 var engine = new NfpPlacementEngine(request, orientationsByPart, cache);
 
+                // Route the frame nester's per-frame progress to the Rhino
+                // command line and keep Rhino responsive (the increment-1 run
+                // completed but looked frozen because it ran silently).
+                engine.DiagnosticLog = msg =>
+                {
+                    RhinoApp.WriteLine(msg);
+                    RhinoApp.Wait();
+                };
+
                 // Frame set: Irregular parts with bbox area >= 5% of sheet area
                 // (matches NestingEngine.cs:280-291 CriticalPartIndices).
                 double sheetArea = sheetW * sheetH;
@@ -182,16 +191,29 @@ namespace SeaNest.Commands
                     .ThenBy(i => i)
                     .ToList();
 
+                // NOTE (runtime/follow-up): NFP candidate generation runs on the
+                // full-resolution frame polygons (the CurveToPolygon read caps
+                // each at 500 vertices). NFP on high-vertex concave frames is the
+                // slow step. A faster path — simplified polygons for NFP/candidate
+                // generation but full-res for the hard overlap gate and final
+                // output — needs dual geometry in PlaceCoordinatedFrames and is
+                // deferred so the output/gate stay full-resolution. Progress is
+                // reported per frame to keep Rhino responsive meanwhile.
                 var result = engine.PlaceCoordinatedFrames(frames, remaining, diag);
 
                 // Focused validation: no overlap among placed frames.
                 var framePlacements = result.Placements
                     .Where(p => frameSet.Contains(p.OriginalIndex))
                     .ToList();
+                // Overlap is only meaningful WITHIN a sheet: PlacedPolygon
+                // coordinates are sheet-local, so two parts on different sheets
+                // both sit near the origin and would falsely register as
+                // overlapping. Compare only same-sheet pairs.
                 int frameOverlaps = 0;
                 for (int a = 0; a < framePlacements.Count; a++)
                     for (int b = a + 1; b < framePlacements.Count; b++)
-                        if (OverlapChecker.Overlaps(
+                        if (framePlacements[a].Sheet == framePlacements[b].Sheet &&
+                            OverlapChecker.Overlaps(
                                 framePlacements[a].PlacedPolygon,
                                 framePlacements[b].PlacedPolygon))
                             frameOverlaps++;
