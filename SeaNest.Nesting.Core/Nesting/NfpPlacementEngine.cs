@@ -290,7 +290,13 @@ namespace SeaNest.Nesting.Core.Nesting
         // SEANEST_REGRET_WEIGHT environment variable, falling back to this
         // default, so the weight can be swept (0, 1, 10, 100, ...) without
         // recompiling.
-        private const double DefaultRegretWeight = 100.0;
+        //
+        // Phase 28.3.2: default is 0.0 (regret OFF). A weight sweep on the
+        // 31-part benchmark showed regret a net negative — weight 0 and 1 both
+        // reached the best result (8 parts), weight 100 regressed to 7, and
+        // weight 10 blew the time budget on per-candidate regret cost. The
+        // mechanism stays intact; set SEANEST_REGRET_WEIGHT to re-enable it.
+        private const double DefaultRegretWeight = 0.0;
 
         // ------------------------------------------------------------------
         // Per-sheet placement
