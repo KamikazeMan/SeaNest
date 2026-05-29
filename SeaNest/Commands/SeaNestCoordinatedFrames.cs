@@ -41,37 +41,110 @@ namespace SeaNest.Commands
 
             try
             {
+                // --- Input path: re-nest already-placed parts, matching
+                // SeaNestReNestCommand EXACTLY. The user selects the grouped
+                // nested layout (group-select pulls in all members); closed
+                // curves are partitioned into outer parts vs holes and each
+                // outer is converted to a Polygon via the same CurveToPolygon
+                // path ReNest uses. (Open curves / labels never become parts in
+                // ReNest either, so they are not part of the polygon set.)
+                bool isMetric = doc.ModelUnitSystem == UnitSystem.Millimeters
+                             || doc.ModelUnitSystem == UnitSystem.Centimeters
+                             || doc.ModelUnitSystem == UnitSystem.Meters;
+                double inToModel = isMetric
+                    ? RhinoMath.UnitScale(UnitSystem.Inches, doc.ModelUnitSystem)
+                    : 1.0;
+
+                double sheetW, sheetH, margin, spacing;
+                if (!SeaNestNestCommand.PromptForDouble(doc, "Sheet width", 96.0 * inToModel, out sheetW)) return Result.Cancel;
+                if (!SeaNestNestCommand.PromptForDouble(doc, "Sheet height", 48.0 * inToModel, out sheetH)) return Result.Cancel;
+                if (!SeaNestNestCommand.PromptForDouble(doc, "Margin", 0.25 * inToModel, out margin)) return Result.Cancel;
+                if (!SeaNestNestCommand.PromptForDouble(doc, "Spacing", 0.25 * inToModel, out spacing)) return Result.Cancel;
+                diag.Add($"Sheet {sheetW:F2} x {sheetH:F2}, spacing {spacing:F3}, margin {margin:F2}");
+
                 var go = new GetObject();
-                go.SetCommandPrompt("Select all parts to nest (frames + everything else)");
-                go.GeometryFilter = ObjectType.Brep | ObjectType.Extrusion;
+                go.SetCommandPrompt("Select the grouped nested parts to re-nest (frames + everything else)");
+                go.GeometryFilter = ObjectType.Curve | ObjectType.Annotation;
+                go.GroupSelect = true;           // selecting the group selects all members
                 go.SubObjectSelect = false;
                 go.GetMultiple(1, 0);
                 if (go.CommandResult() != Result.Success)
                     return go.CommandResult();
 
-                double sheetW = 240.0, sheetH = 72.0, spacing = 0.25, margin = 0.0;
-                RhinoGet.GetNumber("Sheet width", false, ref sheetW);
-                RhinoGet.GetNumber("Sheet height", false, ref sheetH);
-                RhinoGet.GetNumber("Part spacing", false, ref spacing);
-                diag.Add($"Sheet {sheetW:F2} x {sheetH:F2}, spacing {spacing:F3}, margin {margin:F2}");
+                double modelTol = doc.ModelAbsoluteTolerance;
+                double discretizeTol = modelTol * 0.1;
+                double angleTolRad = RhinoMath.ToRadians(0.5);
 
-                // Flatten selections to engine polygons (same path as the nest commands).
-                var polygons = new List<Polygon>();
+                // Closed curves are the part outlines (open curves = etch/scribe,
+                // annotations = labels; neither becomes a part — same as ReNest).
+                var closedCurves = new List<Curve>();
                 for (int i = 0; i < go.ObjectCount; i++)
                 {
-                    var brep = ToBrep(go.Object(i));
-                    if (brep == null) continue;
-                    var flat = BrepFlattener.Flatten(brep, doc);
-                    if (flat?.OuterPolygon != null)
-                        polygons.Add(flat.OuterPolygon);
+                    if (go.Object(i).Geometry() is Curve cv && cv.IsClosed)
+                        closedCurves.Add(cv);
+                }
+                if (closedCurves.Count == 0)
+                {
+                    diag.Add("No closed curves selected — nothing to nest.");
+                    Flush(diag);
+                    return Result.Cancel;
+                }
+
+                // Topology partition (verbatim from ReNest): containedBy via
+                // pairwise PlanarClosedCurveRelationship, immediate parent =
+                // smallest container, outers = curves with no parent.
+                var topologyPlane = Plane.WorldXY;
+                double topologyTol = modelTol * 10.0;
+                int nC = closedCurves.Count;
+                var containedBy = new List<int>[nC];
+                var bboxArea = new double[nC];
+                for (int i = 0; i < nC; i++)
+                {
+                    containedBy[i] = new List<int>();
+                    var bb = closedCurves[i].GetBoundingBox(true);
+                    bboxArea[i] = bb.Diagonal.X * bb.Diagonal.Y;
+                }
+                for (int i = 0; i < nC - 1; i++)
+                    for (int j = i + 1; j < nC; j++)
+                    {
+                        var rel = Curve.PlanarClosedCurveRelationship(
+                            closedCurves[i], closedCurves[j], topologyPlane, topologyTol);
+                        if (rel == RegionContainment.AInsideB) containedBy[i].Add(j);
+                        else if (rel == RegionContainment.BInsideA) containedBy[j].Add(i);
+                    }
+                var parent = new int[nC];
+                for (int i = 0; i < nC; i++)
+                {
+                    if (containedBy[i].Count == 0) { parent[i] = -1; continue; }
+                    int smallest = containedBy[i][0];
+                    for (int k = 1; k < containedBy[i].Count; k++)
+                        if (bboxArea[containedBy[i][k]] < bboxArea[smallest])
+                            smallest = containedBy[i][k];
+                    parent[i] = smallest;
+                }
+                var outers = new List<int>();
+                for (int i = 0; i < nC; i++)
+                    if (parent[i] == -1) outers.Add(i);
+
+                // Convert each outer to a Polygon (verbatim CurveToPolygon path).
+                var polygons = new List<Polygon>();
+                foreach (int outerIdx in outers)
+                {
+                    var outerCurve = closedCurves[outerIdx];
+                    if (!outerCurve.TryGetPlane(out Plane op, discretizeTol * 10.0))
+                        op = Plane.WorldXY;
+                    var converted = CurveToPolygon(outerCurve, op, discretizeTol, angleTolRad, MaxVertices);
+                    if (converted == null) continue;
+                    polygons.Add(converted.Value.polygon);
                 }
                 if (polygons.Count == 0)
                 {
-                    diag.Add("No parts could be flattened.");
+                    diag.Add("No curves could be converted. Aborting.");
                     Flush(diag);
                     return Result.Failure;
                 }
-                diag.Add($"Flattened {polygons.Count} part(s).");
+                diag.Add($"Read {polygons.Count} outer part(s) from the nested layout " +
+                         $"({nC} closed curve(s); {nC - outers.Count} hole(s) excluded).");
 
                 var request = new NestRequest(
                     polygons, sheetW, sheetH, 0.0, margin, spacing,
@@ -177,13 +250,83 @@ namespace SeaNest.Commands
             }
         }
 
-        private static Brep ToBrep(ObjRef objRef)
+        // Curve->Polygon conversion constants and helpers, copied verbatim from
+        // SeaNestReNestCommand so this command's part-acquisition is identical
+        // (and the production ReNest command is left untouched).
+        private const int MaxVertices = 500;
+        private const double EscalationFactor = 2.0;
+        private const int MaxEscalations = 3;
+
+        private static (Polygon polygon, Curve originalCurve, double finalTolerance)? CurveToPolygon(
+            Curve curve, Plane plane, double discretizeTol, double angleTolRad, int maxVertices)
         {
-            if (objRef == null) return null;
-            var brep = objRef.Brep();
-            if (brep != null) return brep;
-            if (objRef.Geometry() is Extrusion ext) return ext.ToBrep();
-            return null;
+            if (!curve.IsClosed)
+                return null;
+
+            Polyline polyline;
+            if (!curve.TryGetPolyline(out polyline))
+            {
+                var polylineCurve = curve.ToPolyline(
+                    mainSegmentCount: 0,
+                    subSegmentCount: 0,
+                    maxAngleRadians: angleTolRad,
+                    maxChordLengthRatio: 0,
+                    maxAspectRatio: 0,
+                    tolerance: discretizeTol,
+                    minEdgeLength: 0,
+                    maxEdgeLength: 0,
+                    keepStartPoint: true);
+                if (polylineCurve == null || !polylineCurve.TryGetPolyline(out polyline))
+                    return null;
+            }
+
+            if (polyline == null || polyline.Count < 3) return null;
+
+            var points = new List<Point2D>(polyline.Count);
+            int count = polyline.Count;
+            if (polyline.IsClosed && count > 3) count--;
+            for (int i = 0; i < count; i++)
+            {
+                var pt3 = polyline[i];
+                if (!plane.ClosestParameter(pt3, out double u, out double v))
+                    return null;
+                points.Add(new Point2D(u, v));
+            }
+            if (points.Count < 3) return null;
+
+            Polygon poly;
+            try { poly = new Polygon(points); }
+            catch (ArgumentException) { return null; }
+
+            Polygon simplified;
+            double finalTol;
+            try
+            {
+                simplified = poly.SimplifyToTarget(
+                    initialTolerance: discretizeTol,
+                    maxVertices: maxVertices,
+                    escalationFactor: EscalationFactor,
+                    maxEscalations: MaxEscalations,
+                    out finalTol);
+            }
+            catch (ArgumentException)
+            {
+                simplified = poly;
+                finalTol = discretizeTol;
+            }
+
+            var localCurve = MapCurveToLocalFrame(curve, plane);
+            return (simplified, localCurve, finalTol);
+        }
+
+        private static Curve MapCurveToLocalFrame(Curve curve, Plane plane)
+        {
+            var local = curve.DuplicateCurve();
+            var projected = Curve.ProjectToPlane(local, plane);
+            if (projected != null) local = projected;
+            var planeToXY = Transform.PlaneToPlane(plane, Plane.WorldXY);
+            local.Transform(planeToXY);
+            return local;
         }
 
         private static int GetOrCreateLayer(RhinoDoc doc, string name, System.Drawing.Color color)
