@@ -275,47 +275,57 @@ namespace SeaNest.Nesting.Core.Nesting
 
                 int bestFrame = -1;
                 double bestY = double.MaxValue, bestX = double.MaxValue;
+                int bestOrientIdx = int.MaxValue;
                 OrientedPart bestOrient = null;
 
                 foreach (int f in pending)
                 {
-                    var fo = Orient0(f);
-                    var ifp = InnerFitPolygon.Compute(
-                        fo, _request.SheetWidth, _request.SheetHeight, _request.Margin);
-                    if (!ifp.HasValue) continue;
-
-                    // Forbidden region of fo against all committed frames.
-                    sheet.ForbiddenByOrientation.Clear();
-                    Paths64 forbidden = GetOrBuildForbiddenRegion(fo, sheet);
-                    Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
-                    if (feasible.Count == 0) continue;
-
-                    var candidates = FindCandidateVertices(feasible, MaxCandidateVertices);
-                    foreach (var cand in candidates)
+                    // Increment 2: try ALL orientations of this frame. The list
+                    // is in ascending OrientationIndex order (OrientedPart.BuildAll
+                    // appends per part in index order), so enumeration is
+                    // deterministic.
+                    foreach (var fo in _orientationsByPart[f])
                     {
-                        var poly = fo.CanonicalPolygon.Translate(cand.X, cand.Y);
+                        var ifp = InnerFitPolygon.Compute(
+                            fo, _request.SheetWidth, _request.SheetHeight, _request.Margin);
+                        if (!ifp.HasValue) continue;
 
-                        bool overlaps = false;
-                        foreach (var c in committed)
+                        // Forbidden region of fo against all committed frames.
+                        sheet.ForbiddenByOrientation.Clear();
+                        Paths64 forbidden = GetOrBuildForbiddenRegion(fo, sheet);
+                        Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
+                        if (feasible.Count == 0) continue;
+
+                        var candidates = FindCandidateVertices(feasible, MaxCandidateVertices);
+                        foreach (var cand in candidates)
                         {
-                            var prior = c.Orient.CanonicalPolygon.Translate(c.X, c.Y);
-                            if (OverlapChecker.Overlaps(poly, prior, OverlapTolerance))
+                            var poly = fo.CanonicalPolygon.Translate(cand.X, cand.Y);
+
+                            bool overlaps = false;
+                            foreach (var c in committed)
                             {
-                                overlaps = true;
-                                break;
+                                var prior = c.Orient.CanonicalPolygon.Translate(c.X, c.Y);
+                                if (OverlapChecker.Overlaps(poly, prior, OverlapTolerance))
+                                {
+                                    overlaps = true;
+                                    break;
+                                }
                             }
-                        }
-                        if (overlaps) continue;
+                            if (overlaps) continue;
 
-                        // Placeholder score + total-order tiebreak: (Y, X, frame).
-                        if (cand.Y < bestY ||
-                            (cand.Y == bestY && cand.X < bestX) ||
-                            (cand.Y == bestY && cand.X == bestX && f < bestFrame))
-                        {
-                            bestFrame = f;
-                            bestY = cand.Y;
-                            bestX = cand.X;
-                            bestOrient = fo;
+                            // Placeholder score = bottom-left bias (Y then X);
+                            // total-order tiebreak by orientation index then frame
+                            // index for byte-identical determinism.
+                            if (IsBetterFramePlacement(
+                                    cand.Y, cand.X, fo.OrientationIndex, f,
+                                    bestY, bestX, bestOrientIdx, bestFrame))
+                            {
+                                bestFrame = f;
+                                bestY = cand.Y;
+                                bestX = cand.X;
+                                bestOrientIdx = fo.OrientationIndex;
+                                bestOrient = fo;
+                            }
                         }
                     }
                 }
@@ -360,7 +370,8 @@ namespace SeaNest.Nesting.Core.Nesting
                 sheet.ForbiddenByOrientation.Clear();
                 pending.Remove(bestFrame);
                 diag.Add($"  Placed frame {bestFrame} at ({bestX:F3},{bestY:F3}) " +
-                         $"[placeholder score Y={bestY:F3}, X={bestX:F3}]");
+                         $"orient={bestOrient.OrientationIndex} rot={bestOrient.RotationDeg:F0} " +
+                         $"mirror={bestOrient.IsMirrored} [placeholder score Y={bestY:F3}, X={bestX:F3}]");
                 DiagnosticLog?.Invoke(
                     $"Coordinated frames: placed frame {bestFrame} " +
                     $"({committed.Count} of {totalFrames}).");
@@ -412,6 +423,20 @@ namespace SeaNest.Nesting.Core.Nesting
             fillOrder.AddRange(pending);
 
             return PlaceAllWithPreplaced(fillOrder, preplaced);
+        }
+
+        // Phase 30 total-order comparison for the coordinated-frame greedy step.
+        // Primary score = bottom-left bias (lower Y, then lower X). Ties broken
+        // deterministically by orientation index, then frame index, so repeated
+        // runs are byte-identical regardless of enumeration order.
+        private static bool IsBetterFramePlacement(
+            double y, double x, int orientIdx, int frame,
+            double bestY, double bestX, int bestOrientIdx, int bestFrame)
+        {
+            if (y != bestY) return y < bestY;
+            if (x != bestX) return x < bestX;
+            if (orientIdx != bestOrientIdx) return orientIdx < bestOrientIdx;
+            return frame < bestFrame;
         }
 
         public sealed class NestResult
