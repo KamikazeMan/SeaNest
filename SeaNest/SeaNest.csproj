@@ -23,6 +23,15 @@
     <PackageReference Include="System.Drawing.Common" Version="10.0.3" />
   </ItemGroup>
 
+  <!-- Phase 29 CP-SAT feasibility spike (THROWAWAY — do not merge to main).
+       OR-Tools 9.12.x is the last release line that targets net6.0, which the
+       Rhino 8 .NET 7 host can load via roll-forward. 9.13+ target net8.0 only
+       and will NOT load on .NET 7. Scoped to net7.0 so the net48 (Rhino 7)
+       build still compiles; SeaNestCpSatSpike is #if NET7_0-guarded to match. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net7.0'">
+    <PackageReference Include="Google.OrTools" Version="9.12.4544" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\SeaNest.Nesting.Core\SeaNest.Nesting.Core.csproj" />
   </ItemGroup>
