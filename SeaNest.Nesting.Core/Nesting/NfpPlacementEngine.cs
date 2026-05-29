@@ -27,6 +27,10 @@ namespace SeaNest.Nesting.Core.Nesting
         private readonly IReadOnlyList<List<OrientedPart>> _orientationsByPart;
         private readonly NfpCache _nfpCache;
 
+        // Phase 28.3.1: effective regret weight (see DefaultRegretWeight),
+        // resolved once from SEANEST_REGRET_WEIGHT at construction.
+        private readonly double _regretWeight;
+
         public Action<string> DiagnosticLog { get; set; }
 
         public bool EnableInteriorSampling { get; set; } = false;
@@ -55,6 +59,16 @@ namespace SeaNest.Nesting.Core.Nesting
             _request = request ?? throw new ArgumentNullException(nameof(request));
             _orientationsByPart = orientationsByPart ?? throw new ArgumentNullException(nameof(orientationsByPart));
             _nfpCache = nfpCache ?? throw new ArgumentNullException(nameof(nfpCache));
+
+            string regretRaw = Environment.GetEnvironmentVariable("SEANEST_REGRET_WEIGHT");
+            _regretWeight =
+                double.TryParse(
+                    regretRaw,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out double parsedRegret)
+                    ? parsedRegret
+                    : DefaultRegretWeight;
         }
 
         public NestResult PlaceAll(IReadOnlyList<int> partOrder)
@@ -270,10 +284,13 @@ namespace SeaNest.Nesting.Core.Nesting
         private const double ContactRewardWeight = 30.0;
         private const double LooseIslandPenaltyWeight = 4.0;
 
-        // Phase 28.3: weight on regret (feasible-area lost by unplaced critical
-        // parts when the current part's candidate is placed). Matches
-        // UsedAreaWeight as a starting point; tune later.
-        private const double RegretWeight = 100.0;
+        // Phase 28.3 / 28.3.1: weight on regret (feasible-area lost by unplaced
+        // critical parts when the current part's candidate is placed). The
+        // effective value (_regretWeight) is read once at construction from the
+        // SEANEST_REGRET_WEIGHT environment variable, falling back to this
+        // default, so the weight can be swept (0, 1, 10, 100, ...) without
+        // recompiling.
+        private const double DefaultRegretWeight = 100.0;
 
         // ------------------------------------------------------------------
         // Per-sheet placement
@@ -1378,7 +1395,7 @@ namespace SeaNest.Nesting.Core.Nesting
                                     MeasureFeasibleArea(unplacedCriticals[c], newSheet);
                                 totalRegret += criticalAreaBefore[c] - after;
                             }
-                            regretTerm = RegretWeight * totalRegret;
+                            regretTerm = _regretWeight * totalRegret;
                         }
 
                         var placedPoly = cand.Orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
