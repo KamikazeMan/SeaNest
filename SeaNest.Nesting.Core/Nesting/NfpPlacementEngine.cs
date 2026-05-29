@@ -263,44 +263,73 @@ namespace SeaNest.Nesting.Core.Nesting
             diag.Add($"Frames to place ({totalFrames}), largest-first: " +
                      string.Join(",", pending));
 
+            // Phase 30 increment 3 state.
+            double inflateDelta = ContactInflateMultiplier * _request.Spacing;
+            diag.Add($"Contact metric: w_bbox={FrameBboxWeight:F1}, " +
+                     $"w_contact={FrameContactWeight:F1}, " +
+                     $"inflate delta={inflateDelta:F3} ({ContactInflateMultiplier:F1}x spacing).");
+
+            // Inflated-canonical paths cached per orientation (translation just
+            // shifts Path64 points; the dilated shape itself doesn't change).
+            var inflatedCanonByOrient = new Dictionary<int, Paths64>();
+
+            // Union of placed-frame polygons (Paths64), updated on each commit.
+            Paths64 placedFramesUnion = new Paths64();
+
+            // Combined bbox of all placed frames, tracked incrementally.
+            bool hasCommitted = false;
+            double curMinX = 0, curMinY = 0, curMaxX = 0, curMaxY = 0;
+            double curHalfPerim = 0.0;
+
             // Greedy loop: each iteration commits the single best valid (frame,
-            // position) across all pending frames. The first iteration runs on an
-            // empty sheet, so the largest pending frame wins the bottom-left
-            // corner naturally (its candidate set includes y≈0 and it is first in
-            // pending order, decided by the (Y,X,frameIndex) tiebreak).
+            // orientation, position) across all pending frames by the contact-
+            // metric score (lower = better).
             while (pending.Count > 0)
             {
                 DiagnosticLog?.Invoke(
                     $"Coordinated frames: placing frame {committed.Count + 1} of {totalFrames}...");
 
                 int bestFrame = -1;
+                double bestScore = double.MaxValue;
                 double bestY = double.MaxValue, bestX = double.MaxValue;
                 int bestOrientIdx = int.MaxValue;
                 OrientedPart bestOrient = null;
+                double bestContact = 0.0, bestBboxGrow = 0.0;
 
                 foreach (int f in pending)
                 {
-                    // Increment 2: try ALL orientations of this frame. The list
-                    // is in ascending OrientationIndex order (OrientedPart.BuildAll
-                    // appends per part in index order), so enumeration is
-                    // deterministic.
+                    // Try ALL orientations (ascending OrientationIndex).
                     foreach (var fo in _orientationsByPart[f])
                     {
                         var ifp = InnerFitPolygon.Compute(
                             fo, _request.SheetWidth, _request.SheetHeight, _request.Margin);
                         if (!ifp.HasValue) continue;
 
-                        // Forbidden region of fo against all committed frames.
                         sheet.ForbiddenByOrientation.Clear();
                         Paths64 forbidden = GetOrBuildForbiddenRegion(fo, sheet);
                         Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
                         if (feasible.Count == 0) continue;
+
+                        // Cache the inflated canonical-polygon Paths64 once per
+                        // orientation — the dilated shape is translation-invariant,
+                        // so we just shift the cached Path64 points per candidate.
+                        if (!inflatedCanonByOrient.TryGetValue(
+                                fo.OrientationIndex, out var infCanonPaths))
+                        {
+                            var inflated = PolygonInflate.Inflate(
+                                fo.CanonicalPolygon, inflateDelta);
+                            infCanonPaths = new Paths64();
+                            foreach (var p in inflated)
+                                infCanonPaths.Add(ClipperConvert.ToPath64(p));
+                            inflatedCanonByOrient[fo.OrientationIndex] = infCanonPaths;
+                        }
 
                         var candidates = FindCandidateVertices(feasible, MaxCandidateVertices);
                         foreach (var cand in candidates)
                         {
                             var poly = fo.CanonicalPolygon.Translate(cand.X, cand.Y);
 
+                            // Hard overlap gate: TRUE (non-inflated) polygon.
                             bool overlaps = false;
                             foreach (var c in committed)
                             {
@@ -313,18 +342,62 @@ namespace SeaNest.Nesting.Core.Nesting
                             }
                             if (overlaps) continue;
 
-                            // Placeholder score = bottom-left bias (Y then X);
-                            // total-order tiebreak by orientation index then frame
-                            // index for byte-identical determinism.
-                            if (IsBetterFramePlacement(
-                                    cand.Y, cand.X, fo.OrientationIndex, f,
-                                    bestY, bestX, bestOrientIdx, bestFrame))
+                            // Bbox growth: combined half-perimeter delta.
+                            double cMaxX = cand.X + fo.BBox.MaxX;
+                            double cMaxY = cand.Y + fo.BBox.MaxY;
+                            double newMinX = hasCommitted ? Math.Min(curMinX, cand.X) : cand.X;
+                            double newMinY = hasCommitted ? Math.Min(curMinY, cand.Y) : cand.Y;
+                            double newMaxX = hasCommitted ? Math.Max(curMaxX, cMaxX) : cMaxX;
+                            double newMaxY = hasCommitted ? Math.Max(curMaxY, cMaxY) : cMaxY;
+                            double bboxGrow = (newMaxX - newMinX) + (newMaxY - newMinY) - curHalfPerim;
+
+                            // Contact area: translated inflated candidate ∩ placed union.
+                            // Inflate-for-score-only; the overlap gate above used the
+                            // TRUE polygon so this never relaxes correctness.
+                            double contactArea = 0.0;
+                            if (placedFramesUnion.Count > 0)
                             {
-                                bestFrame = f;
+                                long tx = (long)(cand.X * ClipperConvert.Scale);
+                                long ty = (long)(cand.Y * ClipperConvert.Scale);
+                                var translated = new Paths64(infCanonPaths.Count);
+                                foreach (var path in infCanonPaths)
+                                {
+                                    var np = new Path64(path.Count);
+                                    foreach (var pt in path)
+                                        np.Add(new Point64(pt.X + tx, pt.Y + ty));
+                                    translated.Add(np);
+                                }
+                                var inter = Clipper.Intersect(
+                                    translated, placedFramesUnion, FillRule.NonZero);
+                                if (inter != null)
+                                {
+                                    double scaled = 0.0;
+                                    foreach (var path in inter)
+                                    {
+                                        double a = Clipper.Area(path);
+                                        if (a < 0) a = -a;
+                                        scaled += a;
+                                    }
+                                    contactArea = scaled /
+                                        (ClipperConvert.Scale * ClipperConvert.Scale);
+                                }
+                            }
+
+                            double score = FrameBboxWeight * bboxGrow
+                                         - FrameContactWeight * contactArea;
+
+                            if (IsBetterFramePlacement(
+                                    score, fo.OrientationIndex, cand.Y, cand.X, f,
+                                    bestScore, bestOrientIdx, bestY, bestX, bestFrame))
+                            {
+                                bestScore = score;
                                 bestY = cand.Y;
                                 bestX = cand.X;
                                 bestOrientIdx = fo.OrientationIndex;
                                 bestOrient = fo;
+                                bestFrame = f;
+                                bestContact = contactArea;
+                                bestBboxGrow = bboxGrow;
                             }
                         }
                     }
@@ -369,9 +442,32 @@ namespace SeaNest.Nesting.Core.Nesting
                 sheet.Placed.Add(new PlacedItem(bestOrient, bestX, bestY));
                 sheet.ForbiddenByOrientation.Clear();
                 pending.Remove(bestFrame);
+
+                // Update incremental state: placed-frames union + combined bbox.
+                placedFramesUnion.Add(ClipperConvert.ToPath64(bestPoly));
+                placedFramesUnion = Clipper.Union(placedFramesUnion, FillRule.NonZero);
+
+                double bMaxX = bestX + bestOrient.BBox.MaxX;
+                double bMaxY = bestY + bestOrient.BBox.MaxY;
+                if (!hasCommitted)
+                {
+                    curMinX = bestX; curMinY = bestY;
+                    curMaxX = bMaxX; curMaxY = bMaxY;
+                    hasCommitted = true;
+                }
+                else
+                {
+                    curMinX = Math.Min(curMinX, bestX);
+                    curMinY = Math.Min(curMinY, bestY);
+                    curMaxX = Math.Max(curMaxX, bMaxX);
+                    curMaxY = Math.Max(curMaxY, bMaxY);
+                }
+                curHalfPerim = (curMaxX - curMinX) + (curMaxY - curMinY);
+
                 diag.Add($"  Placed frame {bestFrame} at ({bestX:F3},{bestY:F3}) " +
                          $"orient={bestOrient.OrientationIndex} rot={bestOrient.RotationDeg:F0} " +
-                         $"mirror={bestOrient.IsMirrored} [placeholder score Y={bestY:F3}, X={bestX:F3}]");
+                         $"mirror={bestOrient.IsMirrored} [contact={bestContact:F2} " +
+                         $"bboxGrow={bestBboxGrow:F2} score={bestScore:F2}]");
                 DiagnosticLog?.Invoke(
                     $"Coordinated frames: placed frame {bestFrame} " +
                     $"({committed.Count} of {totalFrames}).");
@@ -425,17 +521,17 @@ namespace SeaNest.Nesting.Core.Nesting
             return PlaceAllWithPreplaced(fillOrder, preplaced);
         }
 
-        // Phase 30 total-order comparison for the coordinated-frame greedy step.
-        // Primary score = bottom-left bias (lower Y, then lower X). Ties broken
-        // deterministically by orientation index, then frame index, so repeated
-        // runs are byte-identical regardless of enumeration order.
+        // Phase 30 increment 3 total-order comparison: lower-score wins; ties
+        // broken by orientation index, then Y, then X, then frame index, so
+        // repeated runs are byte-identical regardless of enumeration order.
         private static bool IsBetterFramePlacement(
-            double y, double x, int orientIdx, int frame,
-            double bestY, double bestX, int bestOrientIdx, int bestFrame)
+            double score, int orientIdx, double y, double x, int frame,
+            double bestScore, int bestOrientIdx, double bestY, double bestX, int bestFrame)
         {
+            if (score != bestScore) return score < bestScore;
+            if (orientIdx != bestOrientIdx) return orientIdx < bestOrientIdx;
             if (y != bestY) return y < bestY;
             if (x != bestX) return x < bestX;
-            if (orientIdx != bestOrientIdx) return orientIdx < bestOrientIdx;
             return frame < bestFrame;
         }
 
@@ -520,6 +616,18 @@ namespace SeaNest.Nesting.Core.Nesting
         // weight 10 blew the time budget on per-candidate regret cost. The
         // mechanism stays intact; set SEANEST_REGRET_WEIGHT to re-enable it.
         private const double DefaultRegretWeight = 0.0;
+
+        // Phase 30 increment 3: frame-nester contact metric weights and inflate
+        // delta multiplier. Score (lower=better) = w_bbox*bboxGrow - w_contact*contactArea
+        // so contact dominates bbox-growth (factor 10x) — the cradling reward.
+        // Inflate delta = multiplier * spacing so a candidate sitting at the
+        // NFP boundary (i.e. spacing-distance from a placed frame) actually
+        // overlaps the placed union by ~length × spacing of profile contact.
+        // Multiplier=2 picks that cleanly; at 1x the inflated edge just kisses
+        // the boundary and contact area collapses to ~0. Tunable starting values.
+        private const double FrameContactWeight = 10.0;
+        private const double FrameBboxWeight = 1.0;
+        private const double ContactInflateMultiplier = 2.0;
 
         // ------------------------------------------------------------------
         // Per-sheet placement
