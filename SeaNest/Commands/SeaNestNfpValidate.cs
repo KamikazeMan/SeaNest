@@ -210,7 +210,8 @@ namespace SeaNest.Commands
             try
             {
                 string path = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    System.Environment.GetFolderPath(
+                        System.Environment.SpecialFolder.DesktopDirectory),
                     "phase29_nfp_validate.txt");
                 File.WriteAllLines(path, lines);
                 RhinoApp.WriteLine($"Wrote {path}");
