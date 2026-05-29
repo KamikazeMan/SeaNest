@@ -216,6 +216,169 @@ namespace SeaNest.Nesting.Core.Nesting
             return new NestResult(sheets.Count, placements, unplaced);
         }
 
+        // Phase 30 (increment 1): coordinated frame nester. Greedy best-fit
+        // placement of the large hull frames at FIXED orientation (each frame's
+        // orientation index 0 — no rotation search yet), then hand the placed
+        // frames to PlaceAllWithPreplaced so the existing engine fills the rest.
+        //
+        // frameIndices : the parts to coordinate (CriticalPartIndices).
+        // remainingOrder: every other part, in the order the fill should attempt.
+        // diag         : diagnostic lines appended for the caller to persist.
+        //
+        // Placeholder fit score (increment 1): bottom-left bias (minimize Y,
+        // then X). The real profile-contact metric is increment 3. Frames that
+        // cannot be placed against the stack are appended to the fill order so
+        // PlaceAllWithPreplaced can place them or spill them — never overlap,
+        // never hard-fail. Deterministic: frames seeded largest-area-first
+        // (index tiebreak), candidates from the deterministic FindCandidateVertices,
+        // ties broken by (Y, X, frameIndex). No parallelism.
+        public NestResult PlaceCoordinatedFrames(
+            IReadOnlyList<int> frameIndices,
+            IReadOnlyList<int> remainingOrder,
+            List<string> diag)
+        {
+            if (frameIndices == null) throw new ArgumentNullException(nameof(frameIndices));
+            if (remainingOrder == null) throw new ArgumentNullException(nameof(remainingOrder));
+            if (diag == null) diag = new List<string>();
+
+            // Fixed orientation = each frame's orientation index 0 (rot 0, no mirror).
+            OrientedPart Orient0(int part) => _orientationsByPart[part][0];
+
+            // A scratch sheet whose Placed list holds the committed frames; used
+            // to build the union forbidden region via the existing helper.
+            var sheet = new SheetState();
+            var committed = new List<(int Part, OrientedPart Orient, double X, double Y)>();
+
+            // Pending frames, seeded largest-area first (index tiebreak).
+            var pending = new List<int>(frameIndices);
+            pending.Sort((a, b) =>
+            {
+                int cmp = Orient0(b).CanonicalPolygon.AbsoluteArea
+                    .CompareTo(Orient0(a).CanonicalPolygon.AbsoluteArea);
+                if (cmp != 0) return cmp;
+                return a.CompareTo(b);
+            });
+
+            diag.Add($"Frames to place ({pending.Count}), largest-first: " +
+                     string.Join(",", pending));
+
+            // Greedy loop: each iteration commits the single best valid (frame,
+            // position) across all pending frames. The first iteration runs on an
+            // empty sheet, so the largest pending frame wins the bottom-left
+            // corner naturally (its candidate set includes y≈0 and it is first in
+            // pending order, decided by the (Y,X,frameIndex) tiebreak).
+            while (pending.Count > 0)
+            {
+                int bestFrame = -1;
+                double bestY = double.MaxValue, bestX = double.MaxValue;
+                OrientedPart bestOrient = null;
+
+                foreach (int f in pending)
+                {
+                    var fo = Orient0(f);
+                    var ifp = InnerFitPolygon.Compute(
+                        fo, _request.SheetWidth, _request.SheetHeight, _request.Margin);
+                    if (!ifp.HasValue) continue;
+
+                    // Forbidden region of fo against all committed frames.
+                    sheet.ForbiddenByOrientation.Clear();
+                    Paths64 forbidden = GetOrBuildForbiddenRegion(fo, sheet);
+                    Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
+                    if (feasible.Count == 0) continue;
+
+                    var candidates = FindCandidateVertices(feasible, MaxCandidateVertices);
+                    foreach (var cand in candidates)
+                    {
+                        var poly = fo.CanonicalPolygon.Translate(cand.X, cand.Y);
+
+                        bool overlaps = false;
+                        foreach (var c in committed)
+                        {
+                            var prior = c.Orient.CanonicalPolygon.Translate(c.X, c.Y);
+                            if (OverlapChecker.Overlaps(poly, prior, OverlapTolerance))
+                            {
+                                overlaps = true;
+                                break;
+                            }
+                        }
+                        if (overlaps) continue;
+
+                        // Placeholder score + total-order tiebreak: (Y, X, frame).
+                        if (cand.Y < bestY ||
+                            (cand.Y == bestY && cand.X < bestX) ||
+                            (cand.Y == bestY && cand.X == bestX && f < bestFrame))
+                        {
+                            bestFrame = f;
+                            bestY = cand.Y;
+                            bestX = cand.X;
+                            bestOrient = fo;
+                        }
+                    }
+                }
+
+                if (bestFrame < 0)
+                {
+                    // No pending frame has a valid on-sheet placement against the
+                    // stack; the rest spill into the fill order.
+                    break;
+                }
+
+                committed.Add((bestFrame, bestOrient, bestX, bestY));
+                sheet.Placed.Add(new PlacedItem(bestOrient, bestX, bestY));
+                sheet.ForbiddenByOrientation.Clear();
+                pending.Remove(bestFrame);
+                diag.Add($"  Placed frame {bestFrame} at ({bestX:F3},{bestY:F3}) " +
+                         $"[placeholder score Y={bestY:F3}, X={bestX:F3}]");
+            }
+
+            if (pending.Count > 0)
+                diag.Add($"  Frames not placed (spilled to fill): " +
+                         string.Join(",", pending));
+
+            // Emit committed frames as PreplacedPart using the canonical
+            // transform chain (matches NestingEngine's Phase 24b emit).
+            var preplaced = new List<PreplacedPart>();
+            foreach (var c in committed)
+            {
+                var src = _request.Polygons[c.Part];
+                var srcBBox = src.BoundingBox;
+                double rotDeg = c.Orient.RotationDeg;
+
+                var rotatedNormalized = src.MoveToOrigin();
+                if (Math.Abs(rotDeg) > 0.01)
+                    rotatedNormalized = rotatedNormalized.RotateAround(
+                        Point2D.Origin, rotDeg * Math.PI / 180.0);
+                var rotBBox = rotatedNormalized.BoundingBox;
+
+                var step1 = Transform2D.Translation(-srcBBox.MinX, -srcBBox.MinY);
+                var step2 = Transform2D.RotationDegrees(rotDeg);
+                var step3 = Transform2D.Translation(-rotBBox.MinX, -rotBBox.MinY);
+                var step4 = Transform2D.Translation(c.X, c.Y);
+                var combined = step1.Then(step2).Then(step3).Then(step4);
+
+                var placedPoly = c.Orient.CanonicalPolygon.Translate(c.X, c.Y);
+
+                var placement = new PlacementResult(
+                    originalIndex: c.Part,
+                    sheet: 0,
+                    transform: combined,
+                    rotationDeg: rotDeg,
+                    isMirrored: c.Orient.IsMirrored,
+                    sourceBBoxMinX: srcBBox.MinX,
+                    sourceBBoxMaxX: srcBBox.MaxX,
+                    placedPolygon: placedPoly);
+
+                preplaced.Add(new PreplacedPart(c.Part, 0, c.Orient, c.X, c.Y, placement));
+            }
+
+            // Fill order: caller's remaining parts, then any unplaced frames so
+            // they get a normal (possibly spilling) placement attempt.
+            var fillOrder = new List<int>(remainingOrder);
+            fillOrder.AddRange(pending);
+
+            return PlaceAllWithPreplaced(fillOrder, preplaced);
+        }
+
         public sealed class NestResult
         {
             public int SheetCount { get; }
