@@ -48,6 +48,14 @@ namespace SeaNest.Nesting.Core.Nesting
         public int BeamMaxCandidates { get; set; } = 256;
 
         public IReadOnlyList<int> CriticalPartIndices { get; set; }
+
+        // AABB broad-phase counters for the fill path (TryPlaceOnSheet's two
+        // candidate loops). Accumulated across a run; PlaceCoordinatedFrames
+        // resets them before its single fill call and reports them after so
+        // phase30_frames.txt shows the filter working. Diagnostic only.
+        private long _fillPairChecks;
+        private long _fillAabbSkips;
+        private long _fillNarrowCalls;
         public HashSet<int> IrregularPartIndices { get; set; }
 
         private static readonly string InteriorFallbackLogPath =
@@ -368,6 +376,24 @@ namespace SeaNest.Nesting.Core.Nesting
             // full-res geometry — expected to be rare; surfaced for diagnosis).
             int trueGateRejects = 0;
 
+            // Committed-frame geometry, translated ONCE at commit and cached.
+            // Previously every candidate check re-translated every placed
+            // polygon (a fresh N-vertex allocation per placed frame per
+            // candidate) before OverlapChecker could even reach its own bbox
+            // early-out. Parallel to `committed`.
+            var committedProxyPolys = new List<Polygon>();
+            var committedProxyBBoxes = new List<BoundingBox2D>();
+            var committedFullPolys = new List<Polygon>();
+            var committedFullBBoxes = new List<BoundingBox2D>();
+
+            // AABB broad-phase counters (frame phase). A pair-check is one
+            // (candidate, placed-frame) test; the AABB filter skips the
+            // narrow-phase Clipper call (and the candidate translation) when
+            // the boxes are disjoint.
+            long framePairChecks = 0;
+            long frameAabbSkips = 0;
+            long frameNarrowCalls = 0;
+
             // Phase 30 (speed): explicit frame-phase / fill-phase timing.
             // The fill (PlaceAllWithPreplaced) runs exactly once at the end of
             // this method — this stopwatch proves it and shows the phase split.
@@ -438,19 +464,38 @@ namespace SeaNest.Nesting.Core.Nesting
                             inflatedCanonByOrient[fo.OrientationIndex] = infCanonPaths;
                         }
 
+                        // Candidate AABB extents are pure arithmetic: the proxy
+                        // canonical bbox has min at (0,0), so a candidate at
+                        // (x, y) occupies [x, x+W] × [y, y+H]. No polygon
+                        // allocation needed until a narrow-phase check fires.
+                        double proxyW = foProxy.BBox.MaxX;
+                        double proxyH = foProxy.BBox.MaxY;
+
                         var candidates = FindCandidateVertices(feasible, MaxCandidateVertices);
                         foreach (var cand in candidates)
                         {
-                            // Overlap PRE-check on PROXY polygons (cheap). The
-                            // authoritative gate is the TRUE-polygon check in
-                            // the sorted commit walk below.
-                            var proxyPoly = foProxy.CanonicalPolygon.Translate(cand.X, cand.Y);
+                            // Overlap PRE-check on PROXY polygons with an AABB
+                            // broad phase. The authoritative gate is the TRUE-
+                            // polygon check in the sorted commit walk below.
+                            var candBBox = new BoundingBox2D(
+                                cand.X, cand.Y, cand.X + proxyW, cand.Y + proxyH);
+
+                            Polygon proxyPoly = null; // translated lazily
                             bool overlaps = false;
-                            foreach (var c in committed)
+                            for (int j = 0; j < committedProxyPolys.Count; j++)
                             {
-                                var priorProxy = proxyOrientByIndex[c.Orient.OrientationIndex]
-                                    .CanonicalPolygon.Translate(c.X, c.Y);
-                                if (OverlapChecker.Overlaps(proxyPoly, priorProxy, OverlapTolerance))
+                                framePairChecks++;
+                                if (!candBBox.Intersects(committedProxyBBoxes[j]))
+                                {
+                                    frameAabbSkips++;
+                                    continue;
+                                }
+
+                                if (proxyPoly == null)
+                                    proxyPoly = foProxy.CanonicalPolygon.Translate(cand.X, cand.Y);
+
+                                frameNarrowCalls++;
+                                if (OverlapChecker.Overlaps(proxyPoly, committedProxyPolys[j], OverlapTolerance))
                                 {
                                     overlaps = true;
                                     break;
@@ -544,15 +589,24 @@ namespace SeaNest.Nesting.Core.Nesting
 
                 foreach (var candEntry in iterationCandidates)
                 {
-                    var truePoly = candEntry.FullOrient.CanonicalPolygon
-                        .Translate(candEntry.X, candEntry.Y);
+                    var fullBB = candEntry.FullOrient.BBox;
+                    var trueBBox = new BoundingBox2D(
+                        candEntry.X, candEntry.Y,
+                        candEntry.X + fullBB.MaxX, candEntry.Y + fullBB.MaxY);
+
+                    Polygon truePoly = null; // translated lazily
                     bool trueOverlap = false;
-                    foreach (var c in committed)
+                    for (int j = 0; j < committedFullPolys.Count; j++)
                     {
+                        if (!trueBBox.Intersects(committedFullBBoxes[j]))
+                            continue;
+
+                        if (truePoly == null)
+                            truePoly = candEntry.FullOrient.CanonicalPolygon
+                                .Translate(candEntry.X, candEntry.Y);
+
                         if (OverlapChecker.Overlaps(
-                                truePoly,
-                                c.Orient.CanonicalPolygon.Translate(c.X, c.Y),
-                                OverlapTolerance))
+                                truePoly, committedFullPolys[j], OverlapTolerance))
                         {
                             trueOverlap = true;
                             break;
@@ -598,10 +652,19 @@ namespace SeaNest.Nesting.Core.Nesting
                 sheet.ForbiddenByOrientation.Clear();
                 pending.Remove(bestFrame);
 
+                // Cache the committed geometry once — translated proxy poly
+                // (per-candidate narrow phase), translated full poly (commit
+                // gate), and both bboxes (AABB broad phase).
+                var committedProxyPoly = bestProxyOrient.CanonicalPolygon.Translate(bestX, bestY);
+                committedProxyPolys.Add(committedProxyPoly);
+                committedProxyBBoxes.Add(committedProxyPoly.BoundingBox);
+                var committedFullPoly = bestOrient.CanonicalPolygon.Translate(bestX, bestY);
+                committedFullPolys.Add(committedFullPoly);
+                committedFullBBoxes.Add(committedFullPoly.BoundingBox);
+
                 // Update incremental state: placed-frames PROXY union (contact
                 // scoring) + combined FULL-RES bbox.
-                placedFramesUnion.Add(ClipperConvert.ToPath64(
-                    bestProxyOrient.CanonicalPolygon.Translate(bestX, bestY)));
+                placedFramesUnion.Add(ClipperConvert.ToPath64(committedProxyPoly));
                 placedFramesUnion = Clipper.Union(placedFramesUnion, FillRule.NonZero);
 
                 double bMaxX = bestX + bestOrient.BBox.MaxX;
@@ -676,6 +739,9 @@ namespace SeaNest.Nesting.Core.Nesting
             diag.Add($"Frame-phase time: {framePhaseSw.Elapsed.TotalSeconds:F2}s " +
                      $"({committed.Count}/{totalFrames} frames placed; " +
                      $"proxy scoring, {trueGateRejects} candidate(s) rejected by true-polygon commit gate).");
+            diag.Add($"Frame-phase AABB filter: {frameAabbSkips} of {framePairChecks} " +
+                     $"candidate pair-checks skipped by bbox; {frameNarrowCalls} narrow-phase " +
+                     $"Clipper calls remained.");
 
             // Fill order: caller's remaining parts, then any unplaced frames so
             // they get a normal (possibly spilling) placement attempt.
@@ -688,6 +754,9 @@ namespace SeaNest.Nesting.Core.Nesting
             // would be per-single-invocation (much lower than the caller sees).
             DiagnosticLog?.Invoke(
                 $"Coordinated frames: starting single fill phase over {fillOrder.Count} parts...");
+            _fillPairChecks = 0;
+            _fillAabbSkips = 0;
+            _fillNarrowCalls = 0;
             var fillPhaseSw = System.Diagnostics.Stopwatch.StartNew();
             var fillResult = PlaceAllWithPreplaced(fillOrder, preplaced);
             fillPhaseSw.Stop();
@@ -695,6 +764,9 @@ namespace SeaNest.Nesting.Core.Nesting
             int fillPlaced = fillResult.Placements.Count - preplaced.Count;
             diag.Add($"Fill-phase time: {fillPhaseSw.Elapsed.TotalSeconds:F2}s " +
                      $"(single PlaceAllWithPreplaced call; {fillPlaced}/{fillOrder.Count} fill parts placed).");
+            diag.Add($"Fill-phase AABB filter: {_fillAabbSkips} of {_fillPairChecks} " +
+                     $"candidate pair-checks skipped by bbox; {_fillNarrowCalls} narrow-phase " +
+                     $"Clipper calls remained.");
             diag.Add($"Total frame+fill time: " +
                      $"{(framePhaseSw.Elapsed + fillPhaseSw.Elapsed).TotalSeconds:F2}s.");
 
@@ -824,6 +896,25 @@ namespace SeaNest.Nesting.Core.Nesting
             var attemptStopwatch = System.Diagnostics.Stopwatch.StartNew();
             var timeBudget = TimeSpan.FromSeconds(TryPlaceOnSheetTimeBudgetSeconds);
 
+            // Placed-part geometry snapshot, translated ONCE per attempt.
+            // sheet.Placed does not change during this method's candidate
+            // scanning (the commit happens after scanning), so translating
+            // every placed polygon per candidate — the previous behavior —
+            // was pure waste: a fresh N-vertex allocation per (candidate ×
+            // placed part) before OverlapChecker's own bbox early-out could
+            // even run. The AABB broad phase below skips the narrow-phase
+            // Clipper call outright for bbox-disjoint pairs.
+            int placedCount = sheet.Placed.Count;
+            var placedPolysSnap = new Polygon[placedCount];
+            var placedBBoxesSnap = new BoundingBox2D[placedCount];
+            for (int i = 0; i < placedCount; i++)
+            {
+                var pl = sheet.Placed[i];
+                var poly = pl.Orientation.CanonicalPolygon.Translate(pl.X, pl.Y);
+                placedPolysSnap[i] = poly;
+                placedBBoxesSnap[i] = poly.BoundingBox;
+            }
+
             foreach (var orientation in orientations)
             {
                 if (attemptStopwatch.Elapsed > timeBudget)
@@ -898,17 +989,31 @@ namespace SeaNest.Nesting.Core.Nesting
                     if (!IsSaneCandidate(tx, ty))
                         continue;
 
-                    var candidatePoly = orientation.CanonicalPolygon.Translate(tx, ty);
+                    // AABB broad phase: candidate extents are arithmetic
+                    // (canonical bbox min is at the origin), so the candidate
+                    // polygon is only materialized when a narrow-phase check
+                    // actually fires or the candidate survives to scoring.
+                    var candBBox = new BoundingBox2D(
+                        tx, ty,
+                        tx + orientation.BBox.MaxX, ty + orientation.BBox.MaxY);
 
+                    Polygon candidatePoly = null;
                     bool rejected = false;
 
-                    foreach (var placed in sheet.Placed)
+                    for (int pi = 0; pi < placedCount; pi++)
                     {
-                        var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
-                            placed.X,
-                            placed.Y);
+                        _fillPairChecks++;
+                        if (!candBBox.Intersects(placedBBoxesSnap[pi]))
+                        {
+                            _fillAabbSkips++;
+                            continue;
+                        }
 
-                        if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
+                        if (candidatePoly == null)
+                            candidatePoly = orientation.CanonicalPolygon.Translate(tx, ty);
+
+                        _fillNarrowCalls++;
+                        if (OverlapChecker.Overlaps(candidatePoly, placedPolysSnap[pi], OverlapTolerance))
                         {
                             overlapRejections++;
                             rejected = true;
@@ -920,6 +1025,9 @@ namespace SeaNest.Nesting.Core.Nesting
                         continue;
 
                     validCandidateCount++;
+
+                    if (candidatePoly == null)
+                        candidatePoly = orientation.CanonicalPolygon.Translate(tx, ty);
 
                     var score = ScorePlacementCandidate(candidatePoly, sheet);
 
@@ -980,14 +1088,28 @@ namespace SeaNest.Nesting.Core.Nesting
                         if (!IsSaneCandidate(pt.X, pt.Y))
                             continue;
 
-                        var candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
+                        // Same AABB broad phase + placed-geometry snapshot as
+                        // the main candidate loop above.
+                        var candBBox = new BoundingBox2D(
+                            pt.X, pt.Y,
+                            pt.X + orientation.BBox.MaxX, pt.Y + orientation.BBox.MaxY);
 
+                        Polygon candidatePoly = null;
                         bool rejected = false;
-                        foreach (var placed in sheet.Placed)
+                        for (int pi = 0; pi < placedCount; pi++)
                         {
-                            var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
-                                placed.X, placed.Y);
-                            if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
+                            _fillPairChecks++;
+                            if (!candBBox.Intersects(placedBBoxesSnap[pi]))
+                            {
+                                _fillAabbSkips++;
+                                continue;
+                            }
+
+                            if (candidatePoly == null)
+                                candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
+
+                            _fillNarrowCalls++;
+                            if (OverlapChecker.Overlaps(candidatePoly, placedPolysSnap[pi], OverlapTolerance))
                             {
                                 rejected = true;
                                 break;
@@ -998,6 +1120,9 @@ namespace SeaNest.Nesting.Core.Nesting
                             continue;
 
                         interiorValidCount++;
+
+                        if (candidatePoly == null)
+                            candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
 
                         var score = ScorePlacementCandidate(candidatePoly, sheet);
 
