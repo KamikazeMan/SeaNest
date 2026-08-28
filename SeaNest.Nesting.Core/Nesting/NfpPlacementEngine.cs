@@ -292,6 +292,12 @@ namespace SeaNest.Nesting.Core.Nesting
             double curMinX = 0, curMinY = 0, curMaxX = 0, curMaxY = 0;
             double curHalfPerim = 0.0;
 
+            // Phase 30 (speed): explicit frame-phase / fill-phase timing.
+            // The fill (PlaceAllWithPreplaced) runs exactly once at line ~548
+            // below — this stopwatch will prove it, and if it doesn't, the
+            // numbers will show which phase actually dominates on real jobs.
+            var framePhaseSw = System.Diagnostics.Stopwatch.StartNew();
+
             // Greedy loop: each iteration commits the single best valid (frame,
             // orientation, position) across all pending frames by the contact-
             // metric score (lower = better).
@@ -324,7 +330,16 @@ namespace SeaNest.Nesting.Core.Nesting
                             fo, _request.SheetWidth, _request.SheetHeight, _request.Margin);
                         if (!ifp.HasValue) continue;
 
-                        sheet.ForbiddenByOrientation.Clear();
+                        // Cache-clear removed: ForbiddenByOrientation is keyed
+                        // by orientation index and depends only on sheet.Placed,
+                        // which does NOT change during this scoring pass (the
+                        // commit is at end-of-iteration, and the cache is
+                        // cleared then via the post-commit Clear() below).
+                        // Keeping the cache lets pending frames that share an
+                        // orientation index reuse the Union across a single
+                        // greedy iteration — no correctness impact, avoids
+                        // (pending_frames - 1) × orientations redundant Unions
+                        // per iteration.
                         Paths64 forbidden = GetOrBuildForbiddenRegion(fo, sheet);
                         Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
                         if (feasible.Count == 0) continue;
@@ -540,12 +555,32 @@ namespace SeaNest.Nesting.Core.Nesting
                 preplaced.Add(new PreplacedPart(c.Part, 0, c.Orient, c.X, c.Y, placement));
             }
 
+            framePhaseSw.Stop();
+            diag.Add($"Frame-phase time: {framePhaseSw.Elapsed.TotalSeconds:F2}s " +
+                     $"({committed.Count}/{totalFrames} frames placed).");
+
             // Fill order: caller's remaining parts, then any unplaced frames so
             // they get a normal (possibly spilling) placement attempt.
             var fillOrder = new List<int>(remainingOrder);
             fillOrder.AddRange(pending);
 
-            return PlaceAllWithPreplaced(fillOrder, preplaced);
+            // Fill runs EXACTLY ONCE — the single PlaceAllWithPreplaced call
+            // site in this method. The stopwatch below proves it: if fill were
+            // being invoked per-frame somewhere upstream, the reported time
+            // would be per-single-invocation (much lower than the caller sees).
+            DiagnosticLog?.Invoke(
+                $"Coordinated frames: starting single fill phase over {fillOrder.Count} parts...");
+            var fillPhaseSw = System.Diagnostics.Stopwatch.StartNew();
+            var fillResult = PlaceAllWithPreplaced(fillOrder, preplaced);
+            fillPhaseSw.Stop();
+
+            int fillPlaced = fillResult.Placements.Count - preplaced.Count;
+            diag.Add($"Fill-phase time: {fillPhaseSw.Elapsed.TotalSeconds:F2}s " +
+                     $"(single PlaceAllWithPreplaced call; {fillPlaced}/{fillOrder.Count} fill parts placed).");
+            diag.Add($"Total frame+fill time: " +
+                     $"{(framePhaseSw.Elapsed + fillPhaseSw.Elapsed).TotalSeconds:F2}s.");
+
+            return fillResult;
         }
 
         // Phase 30 increment 3 total-order comparison: lower-score wins; ties
