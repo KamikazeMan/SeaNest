@@ -90,27 +90,45 @@ namespace SeaNest.Commands
                     return Result.Cancel;
                 }
 
-                // Topology partition (verbatim from ReNest): containedBy via
-                // pairwise PlanarClosedCurveRelationship, immediate parent =
-                // smallest container, outers = curves with no parent.
+                // Topology partition. containedBy[i] = curves that contain i.
+                // Immediate parent = smallest containing curve by bbox area.
+                // Outers = curves with no parent. Non-outers walk their parent
+                // chain up to a root outer and become attached HOLES of that
+                // root, drawn along with the outer at placement time (was:
+                // silently discarded).
+                //
+                // Containment robustness: the ReNest-verbatim version used
+                // Curve.PlanarClosedCurveRelationship on WorldXY only. That is
+                // strict about tangent plane and misses interior curves whose
+                // plane drifts slightly from WorldXY (Z offset from a prior
+                // operation, tilted parent frame). Symptom on the catamaran
+                // job: 3 pipe-hole circles inside a frame were reported
+                // Disjoint from every other curve and became phantom
+                // standalone parts. Fix: fast XY bbox filter → PCR primary →
+                // Curve.Contains centroid fallback when PCR says Disjoint
+                // despite bbox indicating containment.
                 var topologyPlane = Plane.WorldXY;
                 double topologyTol = modelTol * 10.0;
                 int nC = closedCurves.Count;
                 var containedBy = new List<int>[nC];
+                var bboxes = new BoundingBox[nC];
                 var bboxArea = new double[nC];
                 for (int i = 0; i < nC; i++)
                 {
                     containedBy[i] = new List<int>();
-                    var bb = closedCurves[i].GetBoundingBox(true);
-                    bboxArea[i] = bb.Diagonal.X * bb.Diagonal.Y;
+                    bboxes[i] = closedCurves[i].GetBoundingBox(true);
+                    var d = bboxes[i].Diagonal;
+                    bboxArea[i] = d.X * d.Y;
                 }
                 for (int i = 0; i < nC - 1; i++)
                     for (int j = i + 1; j < nC; j++)
                     {
-                        var rel = Curve.PlanarClosedCurveRelationship(
-                            closedCurves[i], closedCurves[j], topologyPlane, topologyTol);
-                        if (rel == RegionContainment.AInsideB) containedBy[i].Add(j);
-                        else if (rel == RegionContainment.BInsideA) containedBy[j].Add(i);
+                        int cmp = TestContainment(
+                            closedCurves[i], closedCurves[j],
+                            bboxes[i], bboxes[j],
+                            topologyPlane, topologyTol);
+                        if (cmp < 0) containedBy[i].Add(j);
+                        else if (cmp > 0) containedBy[j].Add(i);
                     }
                 var parent = new int[nC];
                 for (int i = 0; i < nC; i++)
@@ -126,8 +144,36 @@ namespace SeaNest.Commands
                 for (int i = 0; i < nC; i++)
                     if (parent[i] == -1) outers.Add(i);
 
-                // Convert each outer to a Polygon (verbatim CurveToPolygon path).
+                // Root-outer for each non-outer curve: walk parent[] to the
+                // topmost ancestor with parent == -1. Handles nested-hole /
+                // island-inside-hole cases naturally by attaching every
+                // interior curve to the outermost frame it lives in — that
+                // frame owns the physical cutting.
+                var rootOuterOf = new int[nC];
+                for (int i = 0; i < nC; i++)
+                {
+                    int cur = i;
+                    while (parent[cur] != -1) cur = parent[cur];
+                    rootOuterOf[i] = cur;
+                }
+
+                // Group hole curve indices by their root outer.
+                var holesByOuter = new Dictionary<int, List<int>>();
+                foreach (int outerIdx in outers) holesByOuter[outerIdx] = new List<int>();
+                for (int i = 0; i < nC; i++)
+                {
+                    if (parent[i] == -1) continue;
+                    holesByOuter[rootOuterOf[i]].Add(i);
+                }
+
+                // Convert each outer to a Polygon (verbatim CurveToPolygon
+                // path). Alongside each polygon, capture the plane-mapped
+                // hole curves in an index-parallel list so the draw step can
+                // apply the placement's transform to each hole via
+                // PolygonToCurve.ToCurveFromOriginal.
                 var polygons = new List<Polygon>();
+                var holeCurvesPerPart = new List<List<Curve>>();
+                var partSourceCurveIdx = new List<int>(); // diagnostic only
                 foreach (int outerIdx in outers)
                 {
                     var outerCurve = closedCurves[outerIdx];
@@ -135,7 +181,20 @@ namespace SeaNest.Commands
                         op = Plane.WorldXY;
                     var converted = CurveToPolygon(outerCurve, op, discretizeTol, angleTolRad, MaxVertices);
                     if (converted == null) continue;
+
                     polygons.Add(converted.Value.polygon);
+                    partSourceCurveIdx.Add(outerIdx);
+
+                    // Map every attached hole into the outer's plane frame so
+                    // it shares WorldXY with the polygon and lines up under
+                    // the same placement transform.
+                    var mappedHoles = new List<Curve>();
+                    foreach (int holeIdx in holesByOuter[outerIdx])
+                    {
+                        var mapped = MapCurveToLocalFrame(closedCurves[holeIdx], op);
+                        if (mapped != null) mappedHoles.Add(mapped);
+                    }
+                    holeCurvesPerPart.Add(mappedHoles);
                 }
                 if (polygons.Count == 0)
                 {
@@ -143,8 +202,14 @@ namespace SeaNest.Commands
                     Flush(diag);
                     return Result.Failure;
                 }
+                int totalHolesAttached = holeCurvesPerPart.Sum(l => l.Count);
                 diag.Add($"Read {polygons.Count} outer part(s) from the nested layout " +
-                         $"({nC} closed curve(s); {nC - outers.Count} hole(s) excluded).");
+                         $"({nC} closed curve(s); {totalHolesAttached} hole(s) attached to parents).");
+                for (int k = 0; k < polygons.Count; k++)
+                {
+                    if (holeCurvesPerPart[k].Count > 0)
+                        diag.Add($"  part {k} (curve #{partSourceCurveIdx[k]}): {holeCurvesPerPart[k].Count} hole(s) attached");
+                }
 
                 var request = new NestRequest(
                     polygons, sheetW, sheetH, 0.0, margin, spacing,
@@ -247,9 +312,31 @@ namespace SeaNest.Commands
                 {
                     double yOff = p.Sheet * stride;
                     int lyr = frameSet.Contains(p.OriginalIndex) ? frameLayer : fillLayer;
+
+                    // Draw the outer silhouette.
                     doc.Objects.AddCurve(
                         PolygonToCurve.ToCurve(p.PlacedPolygon, yOff),
                         new ObjectAttributes { LayerIndex = lyr });
+
+                    // Draw every hole attached to this part at the same
+                    // placed-and-oriented position, on the same layer as the
+                    // outer so CAM cuts them together. ToCurveFromOriginal
+                    // handles mirror + Transform2D + per-sheet yOffset — the
+                    // exact same transformation the outer went through — so
+                    // holes land where they belong INSIDE the placed frame.
+                    if (p.OriginalIndex >= 0 && p.OriginalIndex < holeCurvesPerPart.Count)
+                    {
+                        var holes = holeCurvesPerPart[p.OriginalIndex];
+                        for (int h = 0; h < holes.Count; h++)
+                        {
+                            var placedHole = PolygonToCurve.ToCurveFromOriginal(
+                                holes[h], p, yOff);
+                            if (placedHole != null)
+                                doc.Objects.AddCurve(
+                                    placedHole,
+                                    new ObjectAttributes { LayerIndex = lyr });
+                        }
+                    }
                 }
                 doc.Views.Redraw();
 
@@ -339,6 +426,73 @@ namespace SeaNest.Commands
 
             var localCurve = MapCurveToLocalFrame(curve, plane);
             return (simplified, localCurve, finalTol);
+        }
+
+        // Robust curve-vs-curve containment for the topology-partition step.
+        //
+        // Returns:
+        //   -1  if `a` is inside `b`
+        //   +1  if `b` is inside `a`
+        //    0  if neither is inside the other (disjoint, mutually
+        //        intersecting, or bbox-disjoint fast reject)
+        //
+        // Layering:
+        //   1. XY-only bbox test as a fast necessary condition. Uses XY
+        //      coordinates rather than Rhino's 3D BoundingBox.Contains
+        //      because a hole with tiny Z drift from its parent's plane
+        //      would fail the 3D test even though its XY footprint is
+        //      fully inside — exactly the catamaran-job failure mode.
+        //   2. Curve.PlanarClosedCurveRelationship — the primary test.
+        //      Cheap on curves that agree with `pairPlane` and gives the
+        //      final answer for the vast majority of pairs.
+        //   3. Centroid Curve.Contains — fallback when PCR reports
+        //      Disjoint despite bbox-inside. This catches slightly
+        //      off-plane interior curves that PCR rejects. The outer's
+        //      own tangent plane is used for the containment test
+        //      (falling back to `pairPlane`) so a tilted parent frame's
+        //      real plane drives the point-in-region query.
+        //
+        // Kept intentionally single-scope: no caching, no allocations for
+        // the fast-reject path. Called O(n²) in the partition loop; the
+        // primary cost lives in PCR/Contains inside Rhino, not this
+        // dispatcher.
+        private static int TestContainment(
+            Curve a, Curve b,
+            BoundingBox bbA, BoundingBox bbB,
+            Plane pairPlane, double tol)
+        {
+            bool aInsideBBoxOfB = BBoxContainsXY(bbB, bbA);
+            bool bInsideBBoxOfA = BBoxContainsXY(bbA, bbB);
+            if (!aInsideBBoxOfB && !bInsideBBoxOfA) return 0;
+
+            var rel = Curve.PlanarClosedCurveRelationship(a, b, pairPlane, tol);
+            if (rel == RegionContainment.AInsideB) return -1;
+            if (rel == RegionContainment.BInsideA) return +1;
+            if (rel == RegionContainment.MutualIntersection) return 0;
+
+            // rel == Disjoint but bbox says one is inside the other.
+            // Fall back to a centroid-based point-in-region probe.
+            if (aInsideBBoxOfB && CentroidInside(a, b, pairPlane, tol)) return -1;
+            if (bInsideBBoxOfA && CentroidInside(b, a, pairPlane, tol)) return +1;
+            return 0;
+        }
+
+        private static bool BBoxContainsXY(BoundingBox outer, BoundingBox inner)
+        {
+            return outer.Min.X <= inner.Min.X + 1e-12
+                && inner.Max.X <= outer.Max.X + 1e-12
+                && outer.Min.Y <= inner.Min.Y + 1e-12
+                && inner.Max.Y <= outer.Max.Y + 1e-12;
+        }
+
+        private static bool CentroidInside(Curve inner, Curve outer, Plane fallbackPlane, double tol)
+        {
+            var amp = AreaMassProperties.Compute(inner);
+            Point3d probe = amp != null ? amp.Centroid : inner.GetBoundingBox(true).Center;
+            if (!outer.TryGetPlane(out Plane probePlane, tol * 10.0))
+                probePlane = fallbackPlane;
+            var cont = outer.Contains(probe, probePlane, tol);
+            return cont == PointContainment.Inside || cont == PointContainment.Coincident;
         }
 
         private static Curve MapCurveToLocalFrame(Curve curve, Plane plane)
