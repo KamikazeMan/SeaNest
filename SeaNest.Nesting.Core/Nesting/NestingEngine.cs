@@ -1084,6 +1084,13 @@ namespace SeaNest.Nesting.Core.Nesting
         }
 
         private Polygon BuildNfpProxy(Polygon raw, int partIndex)
+            => BuildNfpProxyStatic(raw, partIndex, DiagnosticCallback);
+
+        // Static core of the NFP proxy builder so other engine components
+        // (Phase 30: PlaceCoordinatedFrames' frame-vs-frame scoring) reuse the
+        // exact same simplification method, tolerances, and drift guards as
+        // the main NFP path. `log` replaces the instance DiagnosticCallback.
+        internal static Polygon BuildNfpProxyStatic(Polygon raw, int partIndex, Action<string> log)
         {
             if (raw == null)
                 throw new ArgumentNullException(nameof(raw));
@@ -1110,7 +1117,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 }
                 catch (Exception ex)
                 {
-                    DiagnosticCallback?.Invoke(
+                    log?.Invoke(
                         $"NFP proxy: part {partIndex} simplification failed at tolerance {tol:G4}: {ex.Message}. Using best safe proxy.");
                     break;
                 }
@@ -1123,7 +1130,7 @@ namespace SeaNest.Nesting.Core.Nesting
                         out double heightDrift,
                         out string rejectReason))
                 {
-                    DiagnosticCallback?.Invoke(
+                    log?.Invoke(
                         $"NFP proxy: part {partIndex} rejected tolerance {tol:G4}\" — {rejectReason}. " +
                         $"Using {(foundSafe ? "best previous safe proxy" : "raw polygon")}.");
 
@@ -1148,7 +1155,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             if (bestSafe.Count < raw.Count)
             {
-                DiagnosticCallback?.Invoke(
+                log?.Invoke(
                     $"NFP proxy: part {partIndex} reduced {raw.Count} -> {bestSafe.Count} verts " +
                     $"at tol {bestTol:G4}\"; area drift {bestAreaDrift:P2}, " +
                     $"bbox drift W={bestWidthDrift:G4}\", H={bestHeightDrift:G4}\".");
@@ -1156,7 +1163,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             if (bestSafe.Count > NfpTargetVertices)
             {
-                DiagnosticCallback?.Invoke(
+                log?.Invoke(
                     $"NFP proxy: part {partIndex} still has {bestSafe.Count} verts after max safe tolerance " +
                     $"{bestTol:G4}\". Target is {NfpTargetVertices}. This part may still dominate NFP runtime.");
             }

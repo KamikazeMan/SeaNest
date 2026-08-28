@@ -280,22 +280,97 @@ namespace SeaNest.Nesting.Core.Nesting
                      $"inflate delta={inflateDelta:F3} ({_contactInflateMultiplier:F2}x spacing) " +
                      "[env-tunable: SEANEST_FRAME_BBOX_W / _CONTACT_W / _INFLATE_MULT].");
 
-            // Inflated-canonical paths cached per orientation (translation just
-            // shifts Path64 points; the dilated shape itself doesn't change).
+            // ----------------------------------------------------------------
+            // Phase 30 (speed, dual geometry): frame-phase measured at 1698s of
+            // a 2025s catamaran run — 84% of total — because every NFP,
+            // candidate sweep, and contact Intersect ran on raw ~200-450 vertex
+            // concave frame polygons. Fix: score with SIMPLIFIED proxies, commit
+            // with FULL-RES geometry.
+            //
+            //   Proxy side  : NFP computation, candidate generation, overlap
+            //                 pre-check, contact-area scoring.
+            //   Full-res side: IFP (on-sheet bound), bbox-growth term, the
+            //                 commit-time TRUE-polygon overlap gate, the
+            //                 emitted PreplacedPart (output + fill + holes).
+            //
+            // Proxies come from NestingEngine.BuildNfpProxyStatic — the exact
+            // simplification method, tolerances (0.01" start, 1.5x escalation,
+            // 0.05" cap), drift guards (0.5% area, 0.05" bbox), and 80-vertex
+            // target the main NFP path already uses. Deterministic: fixed
+            // tolerance ladder, same input -> same proxy.
+            //
+            // Proxy orientations share the full-res OrientationIndex so the
+            // proxy NfpCache keys stay aligned with the full-res set.
+            // ----------------------------------------------------------------
+            var proxyOrientByIndex = new Dictionary<int, OrientedPart>();
+            foreach (int f in pending)
+            {
+                var rawSource = _request.Polygons[f];
+                var proxySource = NestingEngine.BuildNfpProxyStatic(rawSource, f, DiagnosticLog);
+                diag.Add($"  Frame {f} NFP proxy: {rawSource.Count} -> {proxySource.Count} verts.");
+
+                foreach (var fo in _orientationsByPart[f])
+                {
+                    proxyOrientByIndex[fo.OrientationIndex] = OrientedPart.Build(
+                        fo.OrientationIndex, f, proxySource, fo.RotationDeg, fo.IsMirrored);
+                }
+            }
+
+            // Frame-phase-local proxy NFP cache. Same spacing as the main cache;
+            // never mixed with _nfpCache (which stays full-res for the fill).
+            var proxyCache = new NfpCache(_request.Spacing);
+
+            // Forbidden region for a candidate proxy orientation against the
+            // committed proxy placements. Mirrors GetOrBuildForbiddenRegion but
+            // reads the proxy cache. Cached per orientation index in the scratch
+            // sheet; invalidated at commit.
+            Paths64 BuildFrameForbidden(OrientedPart candProxy)
+            {
+                if (sheet.Placed.Count == 0)
+                    return new Paths64();
+                if (sheet.ForbiddenByOrientation.TryGetValue(
+                        candProxy.OrientationIndex, out var cached))
+                    return cached;
+
+                var allNfps = new Paths64();
+                foreach (var placed in sheet.Placed)
+                {
+                    var nfp = proxyCache.Get(placed.Orientation, candProxy);
+                    foreach (var nfpPoly in nfp)
+                        allNfps.Add(ClipperConvert.ToPath64(
+                            nfpPoly.Translate(placed.X, placed.Y)));
+                }
+
+                var union = allNfps.Count == 0
+                    ? new Paths64()
+                    : Clipper.Union(allNfps, FillRule.NonZero);
+                sheet.ForbiddenByOrientation[candProxy.OrientationIndex] = union;
+                return union;
+            }
+
+            // Inflated PROXY-canonical paths cached per orientation (translation
+            // just shifts Path64 points; the dilated shape itself doesn't change).
             var inflatedCanonByOrient = new Dictionary<int, Paths64>();
 
-            // Union of placed-frame polygons (Paths64), updated on each commit.
+            // Union of placed-frame PROXY polygons (Paths64), updated on each
+            // commit. Contact-area scoring only; the true-polygon commit gate
+            // never touches this.
             Paths64 placedFramesUnion = new Paths64();
 
-            // Combined bbox of all placed frames, tracked incrementally.
+            // Combined bbox of all placed frames (FULL-Res extents), tracked
+            // incrementally.
             bool hasCommitted = false;
             double curMinX = 0, curMinY = 0, curMaxX = 0, curMaxY = 0;
             double curHalfPerim = 0.0;
 
+            // True-polygon commit-gate rejections across the whole frame phase
+            // (candidates that scored valid on proxies but overlapped on
+            // full-res geometry — expected to be rare; surfaced for diagnosis).
+            int trueGateRejects = 0;
+
             // Phase 30 (speed): explicit frame-phase / fill-phase timing.
-            // The fill (PlaceAllWithPreplaced) runs exactly once at line ~548
-            // below — this stopwatch will prove it, and if it doesn't, the
-            // numbers will show which phase actually dominates on real jobs.
+            // The fill (PlaceAllWithPreplaced) runs exactly once at the end of
+            // this method — this stopwatch proves it and shows the phase split.
             var framePhaseSw = System.Diagnostics.Stopwatch.StartNew();
 
             // Greedy loop: each iteration commits the single best valid (frame,
@@ -306,12 +381,15 @@ namespace SeaNest.Nesting.Core.Nesting
                 DiagnosticLog?.Invoke(
                     $"Coordinated frames: placing frame {committed.Count + 1} of {totalFrames}...");
 
-                int bestFrame = -1;
-                double bestScore = double.MaxValue;
-                double bestY = double.MaxValue, bestX = double.MaxValue;
-                int bestOrientIdx = int.MaxValue;
-                OrientedPart bestOrient = null;
-                double bestContact = 0.0, bestBboxGrow = 0.0;
+                // Candidate collection for this greedy iteration. All scoring
+                // below runs on PROXY geometry; the sorted walk after the scan
+                // applies the TRUE-polygon commit gate and takes the best
+                // candidate that survives it ("simplified-valid but
+                // true-invalid -> reject, try next candidate").
+                var iterationCandidates =
+                    new List<(double Score, int OrientIdx, double Y, double X,
+                              int Frame, OrientedPart FullOrient,
+                              double Contact, double BboxGrow)>();
 
                 // Diagnosis: highest contact area achievable by any VALID
                 // (non-overlapping) candidate per pending frame this step,
@@ -326,32 +404,34 @@ namespace SeaNest.Nesting.Core.Nesting
                     // Try ALL orientations (ascending OrientationIndex).
                     foreach (var fo in _orientationsByPart[f])
                     {
+                        // IFP from the FULL-RES orientation: the proxy bbox can
+                        // be up to the drift guard (0.05") smaller, and an IFP
+                        // computed from it could let the true polygon cross the
+                        // sheet margin. Full-res IFP keeps the on-sheet bound
+                        // exact.
                         var ifp = InnerFitPolygon.Compute(
                             fo, _request.SheetWidth, _request.SheetHeight, _request.Margin);
                         if (!ifp.HasValue) continue;
 
-                        // Cache-clear removed: ForbiddenByOrientation is keyed
-                        // by orientation index and depends only on sheet.Placed,
-                        // which does NOT change during this scoring pass (the
-                        // commit is at end-of-iteration, and the cache is
-                        // cleared then via the post-commit Clear() below).
-                        // Keeping the cache lets pending frames that share an
-                        // orientation index reuse the Union across a single
-                        // greedy iteration — no correctness impact, avoids
-                        // (pending_frames - 1) × orientations redundant Unions
-                        // per iteration.
-                        Paths64 forbidden = GetOrBuildForbiddenRegion(fo, sheet);
+                        var foProxy = proxyOrientByIndex[fo.OrientationIndex];
+
+                        // Forbidden region from PROXY NFPs against committed
+                        // PROXY placements. Cached per orientation index; the
+                        // cache is valid across the whole scoring pass because
+                        // sheet.Placed only changes at commit (which clears it).
+                        Paths64 forbidden = BuildFrameForbidden(foProxy);
                         Paths64 feasible = ComputeFeasibleRegion(ifp.Value, forbidden);
                         if (feasible.Count == 0) continue;
 
-                        // Cache the inflated canonical-polygon Paths64 once per
-                        // orientation — the dilated shape is translation-invariant,
-                        // so we just shift the cached Path64 points per candidate.
+                        // Cache the inflated PROXY-canonical Paths64 once per
+                        // orientation — the dilated shape is translation-
+                        // invariant, so we just shift the cached Path64 points
+                        // per candidate.
                         if (!inflatedCanonByOrient.TryGetValue(
                                 fo.OrientationIndex, out var infCanonPaths))
                         {
                             var inflated = PolygonInflate.Inflate(
-                                fo.CanonicalPolygon, inflateDelta);
+                                foProxy.CanonicalPolygon, inflateDelta);
                             infCanonPaths = new Paths64();
                             foreach (var p in inflated)
                                 infCanonPaths.Add(ClipperConvert.ToPath64(p));
@@ -361,14 +441,16 @@ namespace SeaNest.Nesting.Core.Nesting
                         var candidates = FindCandidateVertices(feasible, MaxCandidateVertices);
                         foreach (var cand in candidates)
                         {
-                            var poly = fo.CanonicalPolygon.Translate(cand.X, cand.Y);
-
-                            // Hard overlap gate: TRUE (non-inflated) polygon.
+                            // Overlap PRE-check on PROXY polygons (cheap). The
+                            // authoritative gate is the TRUE-polygon check in
+                            // the sorted commit walk below.
+                            var proxyPoly = foProxy.CanonicalPolygon.Translate(cand.X, cand.Y);
                             bool overlaps = false;
                             foreach (var c in committed)
                             {
-                                var prior = c.Orient.CanonicalPolygon.Translate(c.X, c.Y);
-                                if (OverlapChecker.Overlaps(poly, prior, OverlapTolerance))
+                                var priorProxy = proxyOrientByIndex[c.Orient.OrientationIndex]
+                                    .CanonicalPolygon.Translate(c.X, c.Y);
+                                if (OverlapChecker.Overlaps(proxyPoly, priorProxy, OverlapTolerance))
                                 {
                                     overlaps = true;
                                     break;
@@ -376,7 +458,8 @@ namespace SeaNest.Nesting.Core.Nesting
                             }
                             if (overlaps) continue;
 
-                            // Bbox growth: combined half-perimeter delta.
+                            // Bbox growth: combined half-perimeter delta, from
+                            // FULL-RES orientation extents (the true footprint).
                             double cMaxX = cand.X + fo.BBox.MaxX;
                             double cMaxY = cand.Y + fo.BBox.MaxY;
                             double newMinX = hasCommitted ? Math.Min(curMinX, cand.X) : cand.X;
@@ -385,9 +468,9 @@ namespace SeaNest.Nesting.Core.Nesting
                             double newMaxY = hasCommitted ? Math.Max(curMaxY, cMaxY) : cMaxY;
                             double bboxGrow = (newMaxX - newMinX) + (newMaxY - newMinY) - curHalfPerim;
 
-                            // Contact area: translated inflated candidate ∩ placed union.
-                            // Inflate-for-score-only; the overlap gate above used the
-                            // TRUE polygon so this never relaxes correctness.
+                            // Contact area: translated inflated PROXY candidate
+                            // ∩ placed PROXY union. Score-only; correctness is
+                            // guarded by the true-polygon commit gate.
                             double contactArea = 0.0;
                             if (placedFramesUnion.Count > 0)
                             {
@@ -426,65 +509,99 @@ namespace SeaNest.Nesting.Core.Nesting
                             double score = _frameBboxWeight * bboxGrow
                                          - _frameContactWeight * contactArea;
 
-                            if (IsBetterFramePlacement(
-                                    score, fo.OrientationIndex, cand.Y, cand.X, f,
-                                    bestScore, bestOrientIdx, bestY, bestX, bestFrame))
-                            {
-                                bestScore = score;
-                                bestY = cand.Y;
-                                bestX = cand.X;
-                                bestOrientIdx = fo.OrientationIndex;
-                                bestOrient = fo;
-                                bestFrame = f;
-                                bestContact = contactArea;
-                                bestBboxGrow = bboxGrow;
-                            }
+                            iterationCandidates.Add(
+                                (score, fo.OrientationIndex, cand.Y, cand.X,
+                                 f, fo, contactArea, bboxGrow));
                         }
                     }
                 }
 
-                if (bestFrame < 0)
+                // Deterministic total order (Phase 30 increment 3 semantics):
+                // lower score wins; ties by orientation index, Y, X, frame
+                // index — so repeated runs are byte-identical regardless of
+                // enumeration order.
+                iterationCandidates.Sort((a, b) =>
                 {
-                    // No pending frame has a valid on-sheet placement against the
-                    // stack; the rest spill into the fill order.
+                    int cmp = a.Score.CompareTo(b.Score);
+                    if (cmp != 0) return cmp;
+                    cmp = a.OrientIdx.CompareTo(b.OrientIdx);
+                    if (cmp != 0) return cmp;
+                    cmp = a.Y.CompareTo(b.Y);
+                    if (cmp != 0) return cmp;
+                    cmp = a.X.CompareTo(b.X);
+                    if (cmp != 0) return cmp;
+                    return a.Frame.CompareTo(b.Frame);
+                });
+
+                // Commit walk: take the best-scored candidate that passes the
+                // TRUE full-resolution overlap gate. Proxy-valid-but-true-
+                // invalid candidates are skipped (counted for diagnosis), NOT
+                // spilled — the next candidate gets its chance.
+                int bestFrame = -1;
+                double bestScore = 0, bestY = 0, bestX = 0;
+                OrientedPart bestOrient = null;
+                double bestContact = 0.0, bestBboxGrow = 0.0;
+
+                foreach (var candEntry in iterationCandidates)
+                {
+                    var truePoly = candEntry.FullOrient.CanonicalPolygon
+                        .Translate(candEntry.X, candEntry.Y);
+                    bool trueOverlap = false;
+                    foreach (var c in committed)
+                    {
+                        if (OverlapChecker.Overlaps(
+                                truePoly,
+                                c.Orient.CanonicalPolygon.Translate(c.X, c.Y),
+                                OverlapTolerance))
+                        {
+                            trueOverlap = true;
+                            break;
+                        }
+                    }
+                    if (trueOverlap)
+                    {
+                        trueGateRejects++;
+                        continue;
+                    }
+
+                    bestFrame = candEntry.Frame;
+                    bestScore = candEntry.Score;
+                    bestY = candEntry.Y;
+                    bestX = candEntry.X;
+                    bestOrient = candEntry.FullOrient;
+                    bestContact = candEntry.Contact;
+                    bestBboxGrow = candEntry.BboxGrow;
                     break;
                 }
 
-                // HARD GATE (defense in depth): re-validate the chosen position
-                // against every committed frame with the FULL-RESOLUTION polygon
-                // before committing. Scoring already rejected overlapping
-                // candidates, so this should never trigger — but it guarantees an
-                // overlapping frame can never be committed regardless of how
-                // candidates are generated. On the (unexpected) failure the frame
-                // is spilled, never placed at an overlapping position.
-                var bestPoly = bestOrient.CanonicalPolygon.Translate(bestX, bestY);
-                bool revalidateOverlap = false;
-                foreach (var c in committed)
+                if (bestFrame < 0)
                 {
-                    if (OverlapChecker.Overlaps(
-                            bestPoly,
-                            c.Orient.CanonicalPolygon.Translate(c.X, c.Y),
-                            OverlapTolerance))
-                    {
-                        revalidateOverlap = true;
-                        break;
-                    }
-                }
-                if (revalidateOverlap)
-                {
-                    diag.Add($"  Frame {bestFrame} best candidate ({bestX:F3},{bestY:F3}) " +
-                             "FAILED commit re-validation — spilling (not committed).");
-                    pending.Remove(bestFrame);
-                    continue;
+                    // No pending frame has any candidate that passes the true-
+                    // polygon gate against the stack; the rest spill into the
+                    // fill order.
+                    break;
                 }
 
+                // Commit. The TRUE-polygon overlap gate already ran in the
+                // sorted commit walk above — every committed position is
+                // verified on FULL-RESOLUTION geometry, so Frame-pair overlaps
+                // stays 0 regardless of proxy drift.
+                //
+                // `committed` carries the FULL-RES orientation: the
+                // PreplacedPart emit below, the fill's seeded sheet state, and
+                // the drawn output (holes included, per dafe397) all read from
+                // it. Only the scratch scoring state (sheet.Placed forbidden
+                // source + placedFramesUnion contact source) uses the proxy.
                 committed.Add((bestFrame, bestOrient, bestX, bestY));
-                sheet.Placed.Add(new PlacedItem(bestOrient, bestX, bestY));
+                var bestProxyOrient = proxyOrientByIndex[bestOrient.OrientationIndex];
+                sheet.Placed.Add(new PlacedItem(bestProxyOrient, bestX, bestY));
                 sheet.ForbiddenByOrientation.Clear();
                 pending.Remove(bestFrame);
 
-                // Update incremental state: placed-frames union + combined bbox.
-                placedFramesUnion.Add(ClipperConvert.ToPath64(bestPoly));
+                // Update incremental state: placed-frames PROXY union (contact
+                // scoring) + combined FULL-RES bbox.
+                placedFramesUnion.Add(ClipperConvert.ToPath64(
+                    bestProxyOrient.CanonicalPolygon.Translate(bestX, bestY)));
                 placedFramesUnion = Clipper.Union(placedFramesUnion, FillRule.NonZero);
 
                 double bMaxX = bestX + bestOrient.BBox.MaxX;
@@ -557,7 +674,8 @@ namespace SeaNest.Nesting.Core.Nesting
 
             framePhaseSw.Stop();
             diag.Add($"Frame-phase time: {framePhaseSw.Elapsed.TotalSeconds:F2}s " +
-                     $"({committed.Count}/{totalFrames} frames placed).");
+                     $"({committed.Count}/{totalFrames} frames placed; " +
+                     $"proxy scoring, {trueGateRejects} candidate(s) rejected by true-polygon commit gate).");
 
             // Fill order: caller's remaining parts, then any unplaced frames so
             // they get a normal (possibly spilling) placement attempt.
@@ -581,20 +699,6 @@ namespace SeaNest.Nesting.Core.Nesting
                      $"{(framePhaseSw.Elapsed + fillPhaseSw.Elapsed).TotalSeconds:F2}s.");
 
             return fillResult;
-        }
-
-        // Phase 30 increment 3 total-order comparison: lower-score wins; ties
-        // broken by orientation index, then Y, then X, then frame index, so
-        // repeated runs are byte-identical regardless of enumeration order.
-        private static bool IsBetterFramePlacement(
-            double score, int orientIdx, double y, double x, int frame,
-            double bestScore, int bestOrientIdx, double bestY, double bestX, int bestFrame)
-        {
-            if (score != bestScore) return score < bestScore;
-            if (orientIdx != bestOrientIdx) return orientIdx < bestOrientIdx;
-            if (y != bestY) return y < bestY;
-            if (x != bestX) return x < bestX;
-            return frame < bestFrame;
         }
 
         public sealed class NestResult
