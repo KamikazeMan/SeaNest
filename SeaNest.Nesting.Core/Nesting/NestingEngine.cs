@@ -256,8 +256,42 @@ namespace SeaNest.Nesting.Core.Nesting
                 ProgressCallback?.Invoke(0.95, "Finalizing...");
             }
 
+            // ----------------------------------------------------------------
+            // Consolidation feasibility gate (anti-thrash). The engine's core
+            // placement ALREADY overflows gracefully — PlaceAll tries each
+            // existing sheet, then opens a new one, so a part set that needs
+            // two sheets lands on two sheets naturally. The three phases
+            // below (evacuation / shelfpack / beam retry) exist solely to
+            // consolidate an N-sheet result into fewer sheets. When the sheet
+            // count is ALREADY at the area lower bound
+            // ceil(total part area / usable sheet area), removing a sheet is
+            // mathematically impossible — every one of those phases would
+            // burn its entire budget failing (measured: 721s on a 50-part
+            // 2-sheet job, with beam logging "beam dropped to zero" and
+            // shelfpack running its full budget). Skip them all outright.
+            // ----------------------------------------------------------------
+            bool consolidationFeasible = false;
+            if (useAnnealing && result.SheetCount >= 2)
+            {
+                double usableSheetAreaGate = request.UsableWidth * request.UsableHeight;
+                double totalPartAreaGate = 0;
+                for (int i = 0; i < nfpPolygons.Count; i++)
+                    totalPartAreaGate += nfpPolygons[i].AbsoluteArea;
+                int minSheetsByArea = Math.Max(1,
+                    (int)Math.Ceiling(totalPartAreaGate / usableSheetAreaGate - 1e-9));
+
+                consolidationFeasible = result.SheetCount > minSheetsByArea;
+                if (!consolidationFeasible)
+                {
+                    DiagnosticCallback?.Invoke(
+                        $"Consolidation skipped: {result.SheetCount} sheet(s) is already the area " +
+                        $"lower bound (parts {totalPartAreaGate:F1} / usable {usableSheetAreaGate:F1} " +
+                        $"per sheet => min {minSheetsByArea} sheet(s)). Overflow result stands.");
+                }
+            }
+
             // Phase 23: last-sheet evacuation pass (NFP_Annealed only).
-            if (useAnnealing && EvacuationTimeBudget.HasValue && result.SheetCount >= 2)
+            if (consolidationFeasible && EvacuationTimeBudget.HasValue && result.SheetCount >= 2)
             {
                 phaseSw.Restart();
                 result = TryEvacuateLastSheet(
@@ -267,7 +301,7 @@ namespace SeaNest.Nesting.Core.Nesting
             }
 
             // Phase 24b: single-sheet shelf-pack attempt (NFP_Annealed only).
-            if (useAnnealing && ShelfPackTimeBudget.HasValue && result.SheetCount >= 2)
+            if (consolidationFeasible && ShelfPackTimeBudget.HasValue && result.SheetCount >= 2)
             {
                 phaseSw.Restart();
                 result = TrySingleSheetShelfPack(
@@ -278,7 +312,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
             // Phase 27: single-sheet constrained beam retry (NFP_Annealed only).
             phaseSw.Restart();
-            if (useAnnealing && engine.BeamRetryTimeBudget.HasValue && result.SheetCount >= 2)
+            if (consolidationFeasible && engine.BeamRetryTimeBudget.HasValue && result.SheetCount >= 2)
             {
                 double totalArea = 0;
                 for (int i = 0; i < nfpPolygons.Count; i++)

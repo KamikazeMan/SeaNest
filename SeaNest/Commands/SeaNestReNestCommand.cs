@@ -38,13 +38,15 @@ namespace SeaNest.Commands
         // doesn't carry that constraint.
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.NFP_Annealed;
         private const bool DefaultAllowMirror = true;
-        // Phase-timing data (mixed-thickness catamaran job): anneal found its
-        // last improvement at t=4.55s of a 30s budget; shelfpack and beam
-        // retry maxed 60s/120s budgets without improving the result. Defaults
-        // cut to match measured convergence — the prompts still accept any
-        // value (0 disables the optional phases).
+        // HARD-CODED phase time budgets (no user prompts). Values match
+        // measured convergence on real jobs: anneal converged at t=4.55s of a
+        // 30s budget; evacuation self-terminated at 12.31s; shelfpack and
+        // beam retry maxed their old 60s/120s budgets only on infeasible
+        // consolidations, which the engine's area-lower-bound gate now skips
+        // outright. Tune here if a future job shows late improvements in the
+        // "SA:" / "NFP phase times:" diagnostic lines.
         private const double DefaultTimeBudgetSeconds = 8.0;
-        private const double DefaultEvacuationBudgetSeconds = 60.0;
+        private const double DefaultEvacuationBudgetSeconds = 30.0;
         private const double DefaultShelfPackBudgetSeconds = 20.0;
         private const double DefaultBeamRetryBudgetSeconds = 30.0;
 
@@ -103,29 +105,16 @@ namespace SeaNest.Commands
 
                 if (algorithm == NestingAlgorithm.NFP_Annealed)
                 {
-                    if (!SeaNestNestCommand.PromptForDouble(doc, "Time budget (seconds)", DefaultTimeBudgetSeconds, out timeBudgetSeconds))
-                        return Rhino.Commands.Result.Cancel;
-                    if (timeBudgetSeconds <= 0)
-                    {
-                        RhinoApp.WriteLine("Time budget must be positive.");
-                        return Rhino.Commands.Result.Failure;
-                    }
-
-                    if (!SeaNestNestCommand.PromptForDouble(doc, "Evacuation budget (seconds, 0=off)", DefaultEvacuationBudgetSeconds, out evacuationBudgetSeconds))
-                        return Rhino.Commands.Result.Cancel;
-                    if (evacuationBudgetSeconds < 0)
-                    {
-                        RhinoApp.WriteLine("Evacuation budget cannot be negative.");
-                        return Rhino.Commands.Result.Failure;
-                    }
-
-                    if (!SeaNestNestCommand.PromptForDouble(doc, "Single-sheet shelf-pack budget (seconds, 0=off)", DefaultShelfPackBudgetSeconds, out shelfPackBudgetSeconds))
-                        return Rhino.Commands.Result.Cancel;
-                    if (shelfPackBudgetSeconds < 0)
-                    {
-                        RhinoApp.WriteLine("Shelf-pack budget cannot be negative.");
-                        return Rhino.Commands.Result.Failure;
-                    }
+                    // Phase time budgets are HARD-CODED (no prompts): the
+                    // instrumented runs showed convergence well inside these
+                    // caps, and the engine's consolidation-feasibility gate
+                    // skips the single-sheet phases outright when the sheet
+                    // count is already at the area lower bound. Tune the
+                    // Default*Seconds constants at the top of this class.
+                    timeBudgetSeconds = DefaultTimeBudgetSeconds;
+                    evacuationBudgetSeconds = DefaultEvacuationBudgetSeconds;
+                    shelfPackBudgetSeconds = DefaultShelfPackBudgetSeconds;
+                    beamRetryBudgetSeconds = DefaultBeamRetryBudgetSeconds;
 
                     var gi = new Rhino.Input.Custom.GetInteger();
                     gi.SetCommandPrompt("Random seed (0=deterministic)");
@@ -138,14 +127,6 @@ namespace SeaNest.Commands
 
                     if (!SeaNestNestCommand.PromptForBool("Interior sampling fallback", true, out interiorSampling))
                         return Rhino.Commands.Result.Cancel;
-
-                    if (!SeaNestNestCommand.PromptForDouble(doc, "Beam retry budget (seconds, 0=off)", DefaultBeamRetryBudgetSeconds, out beamRetryBudgetSeconds))
-                        return Rhino.Commands.Result.Cancel;
-                    if (beamRetryBudgetSeconds < 0)
-                    {
-                        RhinoApp.WriteLine("Beam retry budget cannot be negative.");
-                        return Rhino.Commands.Result.Failure;
-                    }
                 }
                 else
                 {
