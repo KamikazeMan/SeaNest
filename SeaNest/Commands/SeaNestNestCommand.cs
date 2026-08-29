@@ -527,7 +527,13 @@ namespace SeaNest.Commands
         // Drawing: extracted into a helper so SeaNestReNestCommand can reuse it
         // ------------------------------------------------------------------
 
-        internal static void DrawNestingResult(
+        /// <returns>
+        /// The vertical extent consumed by this call's sheets in pre-rotation
+        /// coordinates (SheetCount × sheetStride). Thickness-aware ReNest uses
+        /// it to stack successive thickness groups without overlap; other
+        /// callers can ignore it.
+        /// </returns>
+        internal static double DrawNestingResult(
             RhinoDoc doc,
             NestResponse response,
             double sheetW, double sheetH, double sheetT,
@@ -535,7 +541,9 @@ namespace SeaNest.Commands
             IReadOnlyList<IReadOnlyList<Curve>> innerLoopsPerPart = null,
             IReadOnlyList<string> namesPerPart = null,
             IReadOnlyList<Curve> outerCurvePerPart = null,
-            IReadOnlyList<IReadOnlyList<Curve>> scribeLinesPerPart = null)
+            IReadOnlyList<IReadOnlyList<Curve>> scribeLinesPerPart = null,
+            double baseYOffset = 0.0,
+            string sheetThicknessLabel = null)
         {
             // Phase 8: SLF-RHN Architect font lookup, plus a one-per-command
             // warning if the font isn't available (Rhino bundles it, but a
@@ -567,14 +575,19 @@ namespace SeaNest.Commands
 
             for (int s = 0; s < response.SheetCount; s++)
             {
-                double yOffset = s * sheetStride;
+                double yOffset = baseYOffset + s * sheetStride;
 
                 var sheetCurve = PolygonToCurve.SheetRectangle(sheetW, sheetH, yOffset);
                 var sheetAttrs = new ObjectAttributes { LayerIndex = layerSheetsIdx };
                 var sheetId = doc.Objects.AddCurve(sheetCurve, sheetAttrs);
                 if (sheetId != Guid.Empty) createdObjectIds.Add(sheetId);
 
-                string labelText = FormatSheetLabel(sheetW, sheetH, sheetT, isMetric);
+                // Thickness-aware ReNest passes the original layer notation
+                // (e.g. "3/16", "4mm") so the label reads "360 x 96 x 3/16"
+                // instead of a formatted decimal. Null keeps numeric behavior.
+                string labelText = sheetThicknessLabel != null
+                    ? $"{FormatNumber(sheetW)}{(isMetric ? "mm" : "\"")} x {FormatNumber(sheetH)}{(isMetric ? "mm" : "\"")} x {sheetThicknessLabel}"
+                    : FormatSheetLabel(sheetW, sheetH, sheetT, isMetric);
                 bool lengthIsX = sheetW >= sheetH;
 
                 Point3d labelOrigin;
@@ -605,7 +618,7 @@ namespace SeaNest.Commands
 
             foreach (var pp in response.Placements)
             {
-                double yOffset = pp.Sheet * sheetStride;
+                double yOffset = baseYOffset + pp.Sheet * sheetStride;
 
                 // Phase 9a — outer-draw branch. Two paths, both correctly placed:
                 //
@@ -751,6 +764,8 @@ namespace SeaNest.Commands
             }
 
             doc.Views.Redraw();
+
+            return response.SheetCount * sheetStride;
         }
 
         // ------------------------------------------------------------------

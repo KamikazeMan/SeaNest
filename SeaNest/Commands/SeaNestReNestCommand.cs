@@ -60,7 +60,13 @@ namespace SeaNest.Commands
                 ? RhinoMath.UnitScale(UnitSystem.Inches, doc.ModelUnitSystem)
                 : 1.0;
 
-            double sheetW, sheetH, sheetT, margin, spacing, timeBudgetSeconds;
+            // Thickness-aware ReNest: sheet width/height/spacing are prompted
+            // PER THICKNESS GROUP inside the group loop below (different
+            // thicknesses may come in different sheet sizes). Thickness itself
+            // is no longer prompted at all — it is read from each part's
+            // LAYER name. Margin, rotation, algorithm, and the tuning budgets
+            // stay global (asked once, applied to every group).
+            double margin, timeBudgetSeconds;
             double evacuationBudgetSeconds = 0.0;
             double shelfPackBudgetSeconds = 0.0;
             int randomSeed = 0;
@@ -70,11 +76,7 @@ namespace SeaNest.Commands
             NestingAlgorithm algorithm;
             bool allowMirror;
 
-            if (!SeaNestNestCommand.PromptForDouble(doc, "Sheet width", DefaultSheetWidthIn * inToModel, out sheetW)) return Rhino.Commands.Result.Cancel;
-            if (!SeaNestNestCommand.PromptForDouble(doc, "Sheet height", DefaultSheetHeightIn * inToModel, out sheetH)) return Rhino.Commands.Result.Cancel;
-            if (!SeaNestNestCommand.PromptForDouble(doc, "Sheet thickness", DefaultThicknessIn * inToModel, out sheetT)) return Rhino.Commands.Result.Cancel;
             if (!SeaNestNestCommand.PromptForDouble(doc, "Margin", DefaultMarginIn * inToModel, out margin)) return Rhino.Commands.Result.Cancel;
-            if (!SeaNestNestCommand.PromptForDouble(doc, "Spacing", DefaultSpacingIn * inToModel, out spacing)) return Rhino.Commands.Result.Cancel;
             if (!SeaNestNestCommand.PromptForRotation(out rotStep)) return Rhino.Commands.Result.Cancel;
 
             // Phase 22c — same algorithm chooser as Nest, but ReNest's default
@@ -168,18 +170,37 @@ namespace SeaNest.Commands
             double discretizeTol = modelTol * 0.1;
             double angleTolRad = RhinoMath.ToRadians(0.5);
 
-            // Phase 18.2 — bucket the user's selection.
-            var closedCurves = new List<Curve>();
+            // Phase 18.2 — bucket the user's selection. Thickness-aware: for
+            // closed curves the LAYER NAME is captured alongside the geometry
+            // so parts can be classified by thickness. Open curves and text
+            // stay layer-agnostic — they are never nested, only associated to
+            // a containing part as ride-along etch / labels.
+            var closedCurvesWithLayer = new List<(Curve Curve, string Layer)>();
             var openCurves = new List<Curve>();
             var labels = new List<TextEntity>();
             int skippedAnnotations = 0;
             for (int i = 0; i < go.ObjectCount; i++)
             {
-                var geom = go.Object(i).Geometry();
+                var objRef = go.Object(i);
+                var geom = objRef.Geometry();
                 if (geom is Curve cv)
                 {
-                    if (cv.IsClosed) closedCurves.Add(cv);
-                    else openCurves.Add(cv);
+                    if (cv.IsClosed)
+                    {
+                        string layerName = "";
+                        var rhObj = objRef.Object();
+                        if (rhObj != null)
+                        {
+                            int li = rhObj.Attributes.LayerIndex;
+                            if (li >= 0 && li < doc.Layers.Count)
+                                layerName = doc.Layers[li].Name ?? "";
+                        }
+                        closedCurvesWithLayer.Add((cv, layerName));
+                    }
+                    else
+                    {
+                        openCurves.Add(cv);
+                    }
                 }
                 else if (geom is TextEntity te)
                 {
@@ -192,7 +213,7 @@ namespace SeaNest.Commands
                 }
             }
 
-            if (closedCurves.Count == 0)
+            if (closedCurvesWithLayer.Count == 0)
             {
                 RhinoApp.WriteLine("No closed curves selected — nothing to nest.");
                 return Rhino.Commands.Result.Cancel;
@@ -202,6 +223,112 @@ namespace SeaNest.Commands
                 RhinoApp.WriteLine(
                     $"{skippedAnnotations} non-text annotation(s) skipped (only TextEntity labels supported).");
             }
+
+            // ----------------------------------------------------------------
+            // Thickness classification. Three layer-name formats parse to
+            // decimal inches (TryParseThicknessLayer): fraction with slash or
+            // underscore ("3/16", "3_16" -> 0.1875), decimal inches ("0.375"),
+            // millimeters ("4mm" -> 4/25.4). Excluded layers (PLATE_OUTLINE,
+            // TEXT, SCRIBE_LINES, Default) are sheet boundaries / marks, never
+            // cut parts — ignored with a count. Anything else is unrecognized:
+            // skipped and reported, never nested, never a crash.
+            // ----------------------------------------------------------------
+            var thicknessCurves = new List<(Curve Curve, double Inches, string Notation)>();
+            var excludedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var unrecognizedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (cv, layerName) in closedCurvesWithLayer)
+            {
+                if (IsExcludedLayer(layerName))
+                {
+                    excludedCounts.TryGetValue(layerName, out int ec);
+                    excludedCounts[layerName] = ec + 1;
+                }
+                else if (TryParseThicknessLayer(layerName, out double inches))
+                {
+                    thicknessCurves.Add((cv, inches, layerName.Trim()));
+                }
+                else
+                {
+                    unrecognizedCounts.TryGetValue(layerName, out int uc);
+                    unrecognizedCounts[layerName] = uc + 1;
+                }
+            }
+
+            foreach (var kv in excludedCounts)
+                RhinoApp.WriteLine($"{kv.Value} curve(s) on excluded layer '{kv.Key}' ignored (not cut parts).");
+            foreach (var kv in unrecognizedCounts)
+                RhinoApp.WriteLine($"{kv.Value} curve(s) on unrecognized layer '{kv.Key}' skipped.");
+
+            if (thicknessCurves.Count == 0)
+            {
+                RhinoApp.WriteLine(
+                    "No closed curves on recognized thickness layers (e.g. 3_16, 1/4, 0.375, 4mm) — nothing to nest.");
+                return Rhino.Commands.Result.Cancel;
+            }
+
+            // ----------------------------------------------------------------
+            // Group by thickness VALUE with 0.001" tolerance: "3/16" and
+            // "0.1875" are the same material and merge; genuinely different
+            // thicknesses stay separate — 4mm (0.15748") vs 3/16" (0.1875")
+            // differ by ~0.03" and NEVER merge. Groups ascend by thickness.
+            // Comparison is against the group's first-seen value (no drift
+            // chaining; real plate thicknesses are far apart).
+            // ----------------------------------------------------------------
+            const double ThicknessMergeTolerance = 0.001;
+            var sortedByThickness = thicknessCurves.OrderBy(t => t.Inches).ToList();
+            var groups = new List<(double Inches, string Notation, List<Curve> Curves)>();
+            foreach (var tc in sortedByThickness)
+            {
+                if (groups.Count > 0 &&
+                    Math.Abs(tc.Inches - groups[groups.Count - 1].Inches) <= ThicknessMergeTolerance)
+                {
+                    groups[groups.Count - 1].Curves.Add(tc.Curve);
+                }
+                else
+                {
+                    groups.Add((tc.Inches, tc.Notation, new List<Curve> { tc.Curve }));
+                }
+            }
+
+            RhinoApp.WriteLine(
+                $"Thickness groups: {groups.Count} — " +
+                string.Join(", ", groups.Select(g => $"{g.Notation} ({g.Curves.Count} curve(s))")));
+
+            // ================================================================
+            // Per-thickness-group nesting. Each group runs the full existing
+            // pipeline (topology partition → association → convert → engine →
+            // verify → draw) on ITS OWN curves with ITS OWN sheet size and
+            // spacing, stacked below the previous group's output.
+            //
+            // Holes sit on the SAME thickness layer as their parent's outer
+            // profile (per shop convention), so running the topology partition
+            // per group attaches every hole to a parent in the same group —
+            // the existing attachment logic works unchanged.
+            //
+            // Open curves and labels live in shared pools; each group consumes
+            // the ones contained in its parts, and leftovers are reported once
+            // after all groups (an open curve inside a 3/8" part must not be
+            // reported as an orphan while the 1/4" group is nesting).
+            // ================================================================
+            double groupBaseYOffset = 0.0;
+            double groupGapModel = 12.0 * inToModel;
+            int totalSheetsAll = 0, totalPlacedAll = 0, totalPartsAll = 0;
+            bool anyGroupFailed = false;
+            var groupSummaries = new List<string>();
+
+            // Outcome codes: 0 = ok, 1 = nothing placed, 2 = verifier failed,
+            // 3 = conversion/engine failure. The loop reports and continues on
+            // 1/2/3 so one bad group doesn't abandon the others.
+            int NestGroup(
+                List<Curve> closedCurves,
+                double thicknessInches, string thicknessNotation,
+                double sheetW, double sheetH, double spacing,
+                double groupBaseY,
+                out double consumedHeight, out string groupSummary)
+            {
+            consumedHeight = 0.0;
+            groupSummary = null;
 
             // Phase 18.2 — topology partition of closed curves.
             //
@@ -302,7 +429,7 @@ namespace SeaNest.Commands
             // (e.g., a hatch line drawn across two parts).
             var openLoopsByOuter = new Dictionary<int, List<Curve>>();
             foreach (int o in outers) openLoopsByOuter[o] = new List<Curve>();
-            int orphanOpenCount = 0;
+            var consumedOpens = new List<Curve>();
             foreach (var openCurve in openCurves)
             {
                 var midPt = openCurve.PointAtNormalizedLength(0.5);
@@ -315,15 +442,16 @@ namespace SeaNest.Commands
                         break;
                     }
                 }
-                if (matched >= 0) openLoopsByOuter[matched].Add(openCurve);
-                else orphanOpenCount++;
+                if (matched >= 0)
+                {
+                    openLoopsByOuter[matched].Add(openCurve);
+                    consumedOpens.Add(openCurve);
+                }
+                // Unmatched opens stay in the shared pool: they may belong to a
+                // part in a LATER thickness group. Leftovers after all groups
+                // are reported once by the outer loop.
             }
-            if (orphanOpenCount > 0)
-            {
-                RhinoApp.WriteLine(
-                    $"{orphanOpenCount} open curve(s) not inside any selected outer — dropped " +
-                    "(midpoint outside every outer; likely a stray etch line).");
-            }
+            foreach (var c in consumedOpens) openCurves.Remove(c);
 
             // Label association via anchor-point Curve.Contains.
             // PlainText (round-trips through SeaNest's Phase 8/10/11 emit
@@ -332,8 +460,8 @@ namespace SeaNest.Commands
             // decision, deferred to Phase 18.3 if it becomes a workflow issue).
             // First match wins; subsequent labels for the same outer warn.
             var labelByOuter = new Dictionary<int, string>();
-            int orphanLabelCount = 0;
             int duplicateLabelCount = 0;
+            var consumedLabels = new List<TextEntity>();
             foreach (var label in labels)
             {
                 var anchor = label.Plane.Origin;
@@ -346,7 +474,10 @@ namespace SeaNest.Commands
                         break;
                     }
                 }
-                if (matched < 0) { orphanLabelCount++; continue; }
+                // Unmatched labels stay in the shared pool for later groups;
+                // leftovers are reported once by the outer loop.
+                if (matched < 0) continue;
+                consumedLabels.Add(label);
                 if (labelByOuter.ContainsKey(matched))
                 {
                     duplicateLabelCount++;
@@ -354,9 +485,7 @@ namespace SeaNest.Commands
                 }
                 labelByOuter[matched] = label.PlainText;
             }
-            if (orphanLabelCount > 0)
-                RhinoApp.WriteLine(
-                    $"{orphanLabelCount} label(s) not inside any outer — dropped.");
+            foreach (var l in consumedLabels) labels.Remove(l);
             if (duplicateLabelCount > 0)
                 RhinoApp.WriteLine(
                     $"{duplicateLabelCount} duplicate label(s) — first per outer kept, rest dropped.");
@@ -411,31 +540,31 @@ namespace SeaNest.Commands
 
             if (polygons.Count == 0)
             {
-                RhinoApp.WriteLine("No curves could be converted. Aborting.");
-                return Rhino.Commands.Result.Failure;
+                RhinoApp.WriteLine($"[{thicknessNotation}] No curves could be converted — group skipped.");
+                return 3;
             }
 
             int totalInners = innerLoopsPerPart.Sum(l => l.Count);
             int totalLabels = namesPerPart.Count(s => !string.IsNullOrEmpty(s));
             RhinoApp.WriteLine(
-                $"Re-Nest: {polygons.Count} outer part(s), {totalInners} inner loop(s), {totalLabels} label(s).");
+                $"[{thicknessNotation}] {polygons.Count} outer part(s), {totalInners} inner loop(s), {totalLabels} label(s).");
 
             NestRequest request;
             try
             {
                 request = new NestRequest(
-                    polygons, sheetW, sheetH, sheetT, margin, spacing, rotStep,
+                    polygons, sheetW, sheetH, thicknessInches, margin, spacing, rotStep,
                     algorithm,
                     allowMirror,
                     TimeSpan.FromSeconds(timeBudgetSeconds));
             }
             catch (ArgumentException ex)
             {
-                RhinoApp.WriteLine($"Invalid parameters: {ex.Message}");
-                return Rhino.Commands.Result.Failure;
+                RhinoApp.WriteLine($"[{thicknessNotation}] Invalid parameters: {ex.Message} — group skipped.");
+                return 3;
             }
 
-            var dialog = new ProgressDialog("Re-Nesting... Please Wait");
+            var dialog = new ProgressDialog($"Re-Nesting {thicknessNotation}... Please Wait");
             dialog.Show();
             Application.Instance.RunIteration();
 
@@ -467,8 +596,8 @@ namespace SeaNest.Commands
             catch (Exception ex)
             {
                 dialog.Close();
-                RhinoApp.WriteLine($"Re-nesting failed: {ex.Message}");
-                return Rhino.Commands.Result.Failure;
+                RhinoApp.WriteLine($"[{thicknessNotation}] Re-nesting failed: {ex.Message} — group skipped.");
+                return 3;
             }
             finally
             {
@@ -478,16 +607,16 @@ namespace SeaNest.Commands
             var verification = FinalVerifier.Verify(response.Placements);
             if (!verification.IsValid)
             {
-                string msg = $"{verification.OverlappingPartCount} parts overlap — report this bug";
+                string msg = $"[{thicknessNotation}] {verification.OverlappingPartCount} parts overlap — report this bug";
                 RhinoApp.WriteLine(msg);
                 MessageBox.Show(msg, "SeaNest Re-Nest Error", MessageBoxButtons.OK, MessageBoxType.Error);
-                return Rhino.Commands.Result.Failure;
+                return 2;
             }
 
             if (response.Placements.Count == 0)
             {
-                RhinoApp.WriteLine("No curves could be placed.");
-                return Rhino.Commands.Result.Nothing;
+                RhinoApp.WriteLine($"[{thicknessNotation}] No curves could be placed.");
+                return 1;
             }
 
             // Phase 18.2 — all three parallel lists populated. innerLoopsPerPart
@@ -496,24 +625,161 @@ namespace SeaNest.Commands
             // Phase 8/10/11 emit path computes pole-of-inaccessibility and PCA
             // rotation from the placed polygon, so position and rotation are
             // recomputed at draw time — we only need the string here).
-            SeaNestNestCommand.DrawNestingResult(
-                doc, response, sheetW, sheetH, sheetT, margin, inToModel, isMetric,
+            consumedHeight = SeaNestNestCommand.DrawNestingResult(
+                doc, response, sheetW, sheetH, thicknessInches, margin, inToModel, isMetric,
                 innerLoopsPerPart: innerLoopsPerPart,
                 namesPerPart: namesPerPart,
-                outerCurvePerPart: outerCurvePerPart);
+                outerCurvePerPart: outerCurvePerPart,
+                baseYOffset: groupBaseY,
+                sheetThicknessLabel: thicknessNotation);
 
-            RhinoApp.WriteLine(
-                $"SeaNest Re-Nest: placed {response.Placements.Count}/{polygons.Count} parts " +
-                $"({totalInners} inner loops, {totalLabels} labels) on {response.SheetCount} sheet(s), " +
-                $"utilization {response.Utilization:P1}, {response.ElapsedTime.TotalSeconds:F2}s.");
+            groupSummary =
+                $"{thicknessNotation} ({thicknessInches:0.####}\"): " +
+                $"{response.Placements.Count}/{polygons.Count} part(s), " +
+                $"{response.SheetCount} sheet(s), utilization {response.Utilization:P1}, " +
+                $"{response.ElapsedTime.TotalSeconds:F2}s";
+            RhinoApp.WriteLine($"  {groupSummary}");
 
             if (response.UnplacedIndices.Count > 0)
             {
                 var originalNumbers = response.UnplacedIndices.Select(i => (i + 1).ToString());
-                RhinoApp.WriteLine($"Unplaced parts: {string.Join(", ", originalNumbers)}");
+                RhinoApp.WriteLine($"  [{thicknessNotation}] Unplaced parts: {string.Join(", ", originalNumbers)}");
             }
 
-            return Rhino.Commands.Result.Success;
+            totalSheetsAll += response.SheetCount;
+            totalPlacedAll += response.Placements.Count;
+            totalPartsAll += polygons.Count;
+            return 0;
+            } // end NestGroup
+
+            // ================================================================
+            // Drive the groups, ascending thickness. Sheet width/height and
+            // spacing are prompted PER GROUP (different thicknesses may come
+            // in different sheet sizes); a Cancel on any prompt aborts the
+            // command (groups already drawn stay in the document).
+            // ================================================================
+            int groupNum = 0;
+            foreach (var grp in groups)
+            {
+                groupNum++;
+                RhinoApp.WriteLine(
+                    $"Nesting {grp.Notation} parts ({grp.Inches:0.####}\") — " +
+                    $"{grp.Curves.Count} closed curve(s), group {groupNum} of {groups.Count}:");
+
+                if (!SeaNestNestCommand.PromptForDouble(doc, $"Sheet width for {grp.Notation}", DefaultSheetWidthIn * inToModel, out double grpSheetW))
+                    return Rhino.Commands.Result.Cancel;
+                if (!SeaNestNestCommand.PromptForDouble(doc, $"Sheet height for {grp.Notation}", DefaultSheetHeightIn * inToModel, out double grpSheetH))
+                    return Rhino.Commands.Result.Cancel;
+                if (!SeaNestNestCommand.PromptForDouble(doc, $"Spacing for {grp.Notation}", DefaultSpacingIn * inToModel, out double grpSpacing))
+                    return Rhino.Commands.Result.Cancel;
+
+                int outcome = NestGroup(
+                    grp.Curves, grp.Inches, grp.Notation,
+                    grpSheetW, grpSheetH, grpSpacing,
+                    groupBaseYOffset,
+                    out double consumed, out string summary);
+
+                if (summary != null) groupSummaries.Add(summary);
+                if (outcome != 0)
+                {
+                    anyGroupFailed = true;
+                    continue; // next thickness group; nothing drawn for this one
+                }
+
+                groupBaseYOffset += consumed + groupGapModel;
+            }
+
+            // Leftover opens/labels: contained in no part of any group.
+            if (openCurves.Count > 0)
+                RhinoApp.WriteLine(
+                    $"{openCurves.Count} open curve(s) not inside any nested part — dropped.");
+            if (labels.Count > 0)
+                RhinoApp.WriteLine(
+                    $"{labels.Count} label(s) not inside any nested part — dropped.");
+
+            RhinoApp.WriteLine(
+                $"SeaNest Re-Nest (thickness-aware): {groups.Count} group(s), " +
+                $"{totalPlacedAll}/{totalPartsAll} part(s) placed on {totalSheetsAll} sheet(s) total.");
+            foreach (var s in groupSummaries)
+                RhinoApp.WriteLine($"  {s}");
+
+            return anyGroupFailed ? Rhino.Commands.Result.Failure : Rhino.Commands.Result.Success;
+        }
+
+        // ------------------------------------------------------------------
+        // Thickness-layer parsing
+        // ------------------------------------------------------------------
+
+        private static readonly string[] ExcludedLayers =
+            { "PLATE_OUTLINE", "TEXT", "SCRIBE_LINES", "Default" };
+
+        private static bool IsExcludedLayer(string layerName)
+        {
+            if (string.IsNullOrWhiteSpace(layerName)) return true;
+            string trimmed = layerName.Trim();
+            foreach (var ex in ExcludedLayers)
+                if (string.Equals(trimmed, ex, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Parse a layer name as a plate thickness in decimal inches.
+        /// Three formats:
+        ///   Fraction, slash or underscore: "3/16", "3_16" -> 0.1875;
+        ///     "1/4", "1_4" -> 0.25.
+        ///   Decimal inches: "0.1875", "0.375" -> as-is.
+        ///   Millimeters: "4mm", "6.5mm" (case-insensitive, optional space)
+        ///     -> value / 25.4.
+        /// Anything else is not a thickness layer. InvariantCulture decimal
+        /// parsing so a comma-decimal OS locale can't change grouping.
+        /// </summary>
+        private static bool TryParseThicknessLayer(string layerName, out double inches)
+        {
+            inches = 0.0;
+            if (string.IsNullOrWhiteSpace(layerName)) return false;
+            string s = layerName.Trim();
+
+            // Millimeters: "<number>mm"
+            if (s.EndsWith("mm", StringComparison.OrdinalIgnoreCase))
+            {
+                string num = s.Substring(0, s.Length - 2).Trim();
+                if (double.TryParse(num, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out double mm)
+                    && mm > 0)
+                {
+                    inches = mm / 25.4;
+                    return true;
+                }
+                return false;
+            }
+
+            // Fraction: "N/M" or "N_M"
+            int sep = s.IndexOfAny(new[] { '/', '_' });
+            if (sep > 0 && sep < s.Length - 1)
+            {
+                string numPart = s.Substring(0, sep);
+                string denPart = s.Substring(sep + 1);
+                if (int.TryParse(numPart, out int numerator)
+                    && int.TryParse(denPart, out int denominator)
+                    && numerator > 0 && denominator > 0)
+                {
+                    inches = (double)numerator / denominator;
+                    return true;
+                }
+                return false;
+            }
+
+            // Decimal inches: "0.375", ".375", "0.25"
+            if (double.TryParse(s, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double dec)
+                && dec > 0)
+            {
+                inches = dec;
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
