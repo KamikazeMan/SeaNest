@@ -330,16 +330,19 @@ namespace SeaNest.Nesting.Core.Nesting
             }
 
             // Step 5: Sort placements by original index for stable downstream rendering.
-            // Left-compaction post-pass: slide every placed part as far left
-            // as it can go (respecting margin and spacing), closing air gaps
-            // the anneal left and accumulating a clean remnant on the right
-            // end of each sheet. Translation-only, per sheet, deterministic;
+            // Left+down compaction post-pass, iterated to convergence: slide
+            // every placed part left, then down, repeating the pair until
+            // nothing moves. Left bias packs toward the left end (remnant on
+            // the right); the down passes close vertical gaps and let parts
+            // clear blockers so subsequent left passes carry them further —
+            // right-side parts migrate into the leftmost space they can
+            // legally occupy. Translation-only, per sheet, deterministic;
             // ride-along geometry follows via the composed Transform. The
             // command-level FinalVerifier runs on the compacted placements,
             // so the no-overlap guarantee is independently re-checked
             // downstream.
-            ProgressCallback?.Invoke(0.97, "Compacting left...");
-            var compacted = Compactor.CompactLeft(
+            ProgressCallback?.Invoke(0.97, "Compacting left+down...");
+            var compacted = Compactor.Compact(
                 result.Placements, request.Margin, request.Spacing, DiagnosticCallback);
 
             var placementsSorted = compacted
