@@ -97,16 +97,21 @@ namespace SeaNest.Commands
                 // root, drawn along with the outer at placement time (was:
                 // silently discarded).
                 //
-                // Containment robustness: the ReNest-verbatim version used
-                // Curve.PlanarClosedCurveRelationship on WorldXY only. That is
-                // strict about tangent plane and misses interior curves whose
-                // plane drifts slightly from WorldXY (Z offset from a prior
-                // operation, tilted parent frame). Symptom on the catamaran
-                // job: 3 pipe-hole circles inside a frame were reported
-                // Disjoint from every other curve and became phantom
-                // standalone parts. Fix: fast XY bbox filter → PCR primary →
-                // Curve.Contains centroid fallback when PCR says Disjoint
-                // despite bbox indicating containment.
+                // Containment robustness (two rounds of hardening):
+                //   Round 1 (dafe397): PCR on WorldXY misses interior curves
+                //   with plane drift -> added bbox filter + centroid fallback
+                //   on Disjoint. But the bbox filter used a 1e-12 epsilon and
+                //   MutualIntersection had no fallback — both false-negative
+                //   traps that orphaned the 7th (largest) frame's edge-
+                //   reaching cutouts into standalone parts.
+                //   Round 2 (this commit): bbox tests use topologyTol, only
+                //   bbox-DISJOINT pairs skip PCR, and the centroid fallback
+                //   runs on both Disjoint and MutualIntersection verdicts.
+                //   Near-miss pairs are recorded and surfaced in the diag so
+                //   an unattachable interior curve is loudly visible instead
+                //   of silently nesting as a phantom part.
+                // Attachment happens HERE, at read time, for every curve —
+                // never conditional on whether a frame later places.
                 var topologyPlane = Plane.WorldXY;
                 double topologyTol = modelTol * 10.0;
                 int nC = closedCurves.Count;
@@ -120,15 +125,26 @@ namespace SeaNest.Commands
                     var d = bboxes[i].Diagonal;
                     bboxArea[i] = d.X * d.Y;
                 }
+                // Near-miss log: pairs that LOOKED like hole-in-parent (bbox
+                // containment held) but failed every containment test. Any of
+                // these whose inner curve ends up an outer part is a would-be
+                // orphan — surfaced explicitly in the diagnostic below.
+                var nearMisses = new List<(int Inner, int Outer, string Reason)>();
+
                 for (int i = 0; i < nC - 1; i++)
                     for (int j = i + 1; j < nC; j++)
                     {
                         int cmp = TestContainment(
                             closedCurves[i], closedCurves[j],
                             bboxes[i], bboxes[j],
-                            topologyPlane, topologyTol);
+                            topologyPlane, topologyTol,
+                            out int nearMissInner, out string nearMissReason);
                         if (cmp < 0) containedBy[i].Add(j);
                         else if (cmp > 0) containedBy[j].Add(i);
+                        else if (nearMissInner == 0)
+                            nearMisses.Add((i, j, nearMissReason));
+                        else if (nearMissInner == 1)
+                            nearMisses.Add((j, i, nearMissReason));
                     }
                 var parent = new int[nC];
                 for (int i = 0; i < nC; i++)
@@ -180,7 +196,15 @@ namespace SeaNest.Commands
                     if (!outerCurve.TryGetPlane(out Plane op, discretizeTol * 10.0))
                         op = Plane.WorldXY;
                     var converted = CurveToPolygon(outerCurve, op, discretizeTol, angleTolRad, MaxVertices);
-                    if (converted == null) continue;
+                    if (converted == null)
+                    {
+                        // Silent data loss is not acceptable: the part AND all
+                        // of its attached holes drop out of the nest here.
+                        diag.Add($"  WARNING: outer curve #{outerIdx} failed polygon conversion — " +
+                                 $"part and its {holesByOuter[outerIdx].Count} attached hole(s) " +
+                                 "dropped from nesting.");
+                        continue;
+                    }
 
                     polygons.Add(converted.Value.polygon);
                     partSourceCurveIdx.Add(outerIdx);
@@ -205,10 +229,28 @@ namespace SeaNest.Commands
                 int totalHolesAttached = holeCurvesPerPart.Sum(l => l.Count);
                 diag.Add($"Read {polygons.Count} outer part(s) from the nested layout " +
                          $"({nC} closed curve(s); {totalHolesAttached} hole(s) attached to parents).");
+
+                // Holes-per-part for EVERY part (zero counts included), so a
+                // frame with missing holes is visible at a glance instead of
+                // silently absent from a nonzero-only list.
                 for (int k = 0; k < polygons.Count; k++)
                 {
-                    if (holeCurvesPerPart[k].Count > 0)
-                        diag.Add($"  part {k} (curve #{partSourceCurveIdx[k]}): {holeCurvesPerPart[k].Count} hole(s) attached");
+                    diag.Add($"  part {k} (curve #{partSourceCurveIdx[k]}): " +
+                             $"{holeCurvesPerPart[k].Count} hole(s) attached");
+                }
+
+                // Explicit orphan report: any near-miss pair whose inner curve
+                // ended up as an OUTER part is an interior curve we failed to
+                // attach — exactly the phantom-standalone-part bug. Should be
+                // empty after the containment fix; if it fires, the reason
+                // string says which test failed so the geometry can be
+                // inspected directly.
+                foreach (var nm in nearMisses)
+                {
+                    if (parent[nm.Inner] == -1)
+                        diag.Add($"  WARNING: curve #{nm.Inner} looks interior to curve #{nm.Outer} " +
+                                 $"but could not be attached ({nm.Reason}) — " +
+                                 "it will nest as a STANDALONE part.");
                 }
 
                 var request = new NestRequest(
@@ -456,33 +498,88 @@ namespace SeaNest.Commands
         // the fast-reject path. Called O(n²) in the partition loop; the
         // primary cost lives in PCR/Contains inside Rhino, not this
         // dispatcher.
+        // Returns -1 (a inside b), +1 (b inside a), or 0 (no containment).
+        //
+        // When 0 is returned but one curve's bbox sat inside the other's (a
+        // "near miss" — the pair LOOKED like hole-in-parent but every test
+        // failed), nearMissInner reports which side looked interior (0 = a,
+        // 1 = b, -1 = none) and nearMissReason says why attachment failed, so
+        // the caller can surface would-be-orphans in the diagnostic.
+        //
+        // History: the dafe397 version used a 1e-12 bbox epsilon as a hard
+        // pre-filter and returned 0 on MutualIntersection with no fallback.
+        // Both were false-negative traps for real frames:
+        //   - A hole whose bbox is flush with the frame's bbox (rectangular
+        //     cutouts / notches reaching the frame edge) failed the 1e-12
+        //     test by discretization noise and SKIPPED PCR entirely —
+        //     regressing against the original ReNest behavior of running PCR
+        //     unconditionally. Catamaran symptom: the 7th (largest) frame's
+        //     holes orphaned into standalone parts.
+        //   - A hole grazing the frame boundary within topologyTol
+        //     (modelTol x 10, typically ~0.1") reads as MutualIntersection
+        //     at that coarse tolerance even though it is a true hole.
+        // Fix: the bbox test uses the SAME tolerance as PCR and only fast-
+        // rejects pairs whose boxes don't even intersect (cannot contain);
+        // every intersecting pair reaches PCR; and both the Disjoint and
+        // MutualIntersection verdicts get the centroid-probe fallback when
+        // the bbox says hole-in-parent.
         private static int TestContainment(
             Curve a, Curve b,
             BoundingBox bbA, BoundingBox bbB,
-            Plane pairPlane, double tol)
+            Plane pairPlane, double tol,
+            out int nearMissInner, out string nearMissReason)
         {
-            bool aInsideBBoxOfB = BBoxContainsXY(bbB, bbA);
-            bool bInsideBBoxOfA = BBoxContainsXY(bbA, bbB);
-            if (!aInsideBBoxOfB && !bInsideBBoxOfA) return 0;
+            nearMissInner = -1;
+            nearMissReason = null;
+
+            bool aInsideBBoxOfB = BBoxContainsXY(bbB, bbA, tol);
+            bool bInsideBBoxOfA = BBoxContainsXY(bbA, bbB, tol);
+
+            // Fast reject ONLY when the boxes don't even overlap — such a
+            // pair cannot have a containment relationship. Never skip PCR for
+            // overlapping boxes: near-tangent holes defeat containment-style
+            // bbox tests but PCR still resolves them.
+            if (!BBoxIntersectXY(bbA, bbB, tol))
+                return 0;
 
             var rel = Curve.PlanarClosedCurveRelationship(a, b, pairPlane, tol);
             if (rel == RegionContainment.AInsideB) return -1;
             if (rel == RegionContainment.BInsideA) return +1;
-            if (rel == RegionContainment.MutualIntersection) return 0;
 
-            // rel == Disjoint but bbox says one is inside the other.
-            // Fall back to a centroid-based point-in-region probe.
+            // Both remaining verdicts (Disjoint from plane drift, or
+            // MutualIntersection from boundary-grazing at coarse tolerance)
+            // get the centroid-probe fallback when the bbox relationship
+            // says hole-in-parent. Input layouts are previous nest outputs —
+            // parts do not genuinely overlap — so bbox-inside + centroid-
+            // inside is a hole, not a partial overlap.
             if (aInsideBBoxOfB && CentroidInside(a, b, pairPlane, tol)) return -1;
             if (bInsideBBoxOfA && CentroidInside(b, a, pairPlane, tol)) return +1;
+
+            if (aInsideBBoxOfB)
+            {
+                nearMissInner = 0;
+                nearMissReason = $"PCR={rel}, bbox-inside, centroid probe failed";
+            }
+            else if (bInsideBBoxOfA)
+            {
+                nearMissInner = 1;
+                nearMissReason = $"PCR={rel}, bbox-inside, centroid probe failed";
+            }
             return 0;
         }
 
-        private static bool BBoxContainsXY(BoundingBox outer, BoundingBox inner)
+        private static bool BBoxContainsXY(BoundingBox outer, BoundingBox inner, double tol)
         {
-            return outer.Min.X <= inner.Min.X + 1e-12
-                && inner.Max.X <= outer.Max.X + 1e-12
-                && outer.Min.Y <= inner.Min.Y + 1e-12
-                && inner.Max.Y <= outer.Max.Y + 1e-12;
+            return outer.Min.X <= inner.Min.X + tol
+                && inner.Max.X <= outer.Max.X + tol
+                && outer.Min.Y <= inner.Min.Y + tol
+                && inner.Max.Y <= outer.Max.Y + tol;
+        }
+
+        private static bool BBoxIntersectXY(BoundingBox p, BoundingBox q, double tol)
+        {
+            return p.Min.X <= q.Max.X + tol && q.Min.X <= p.Max.X + tol
+                && p.Min.Y <= q.Max.Y + tol && q.Min.Y <= p.Max.Y + tol;
         }
 
         private static bool CentroidInside(Curve inner, Curve outer, Plane fallbackPlane, double tol)
