@@ -41,12 +41,27 @@ namespace SeaNest.Nesting.Core.Nesting
         ///
         /// This signature matches the existing call in NestingEngine.RunNfpInner.
         /// </summary>
+        /// <param name="diagnostic">
+        /// Optional timing/behavior summary sink (one line at completion:
+        /// iteration count, PlaceAll time share, last-improvement point, exit
+        /// reason). Routed to the command line, unlike progressCallback which
+        /// drives the progress dialog.
+        /// </param>
+        /// <param name="plateauExitIterations">
+        /// Iteration-based early exit: when > 0, the annealing loop stops
+        /// after this many consecutive iterations without a new best result.
+        /// 0 disables (burn the full time budget, pre-optimization behavior).
+        /// Iteration-based rather than time-based so the exit point is
+        /// deterministic for a given input and seed.
+        /// </param>
         public static NfpPlacementEngine.NestResult Optimize(
             NfpPlacementEngine engine,
             IReadOnlyList<int> initialOrder,
             TimeSpan timeBudget,
             int randomSeed,
-            Action<double, string> progressCallback)
+            Action<double, string> progressCallback,
+            Action<string> diagnostic = null,
+            int plateauExitIterations = 0)
         {
             if (engine == null) throw new ArgumentNullException(nameof(engine));
             if (initialOrder == null) throw new ArgumentNullException(nameof(initialOrder));
@@ -59,6 +74,27 @@ namespace SeaNest.Nesting.Core.Nesting
             var random = new Random(randomSeed);
             var stopwatch = Stopwatch.StartNew();
             var lastProgress = Stopwatch.StartNew();
+
+            // Instrumentation: where does annealing time actually go?
+            // PlaceAll is the engine work; everything else in the loop
+            // (mutation, scoring bookkeeping, RNG) is noise by comparison —
+            // measuring PlaceAll total vs wall time proves or disproves that.
+            var placeAllSw = new Stopwatch();
+            long placeAllMs = 0;
+            int placeAllCalls = 0;
+            int lastImprovementIteration = 0;
+            double lastImprovementSeconds = 0.0;
+            string exitReason = "time budget";
+
+            NfpPlacementEngine.NestResult TimedPlaceAll(IReadOnlyList<int> order)
+            {
+                placeAllSw.Restart();
+                var r = engine.PlaceAll(order);
+                placeAllSw.Stop();
+                placeAllMs += placeAllSw.ElapsedMilliseconds;
+                placeAllCalls++;
+                return r;
+            }
 
             // Phase 25.1: if user supplied a non-zero seed, randomize the
             // initial order via Fisher-Yates. This ensures the warm start,
@@ -83,7 +119,7 @@ namespace SeaNest.Nesting.Core.Nesting
             // ------------------------------------------------------------------
 
             var currentOrder = new List<int>(workingInitialOrder);
-            var currentResult = engine.PlaceAll(currentOrder);
+            var currentResult = TimedPlaceAll(currentOrder);
             var currentScore = ScoreResult(currentResult);
 
             var bestOrder = new List<int>(currentOrder);
@@ -112,7 +148,7 @@ namespace SeaNest.Nesting.Core.Nesting
 
                 iteration++;
 
-                var seedResult = engine.PlaceAll(seedOrder);
+                var seedResult = TimedPlaceAll(seedOrder);
                 var seedScore = ScoreResult(seedResult);
 
                 if (IsBetter(seedScore, bestScore))
@@ -120,6 +156,8 @@ namespace SeaNest.Nesting.Core.Nesting
                     bestScore = seedScore;
                     bestResult = seedResult;
                     bestOrder = new List<int>(seedOrder);
+                    lastImprovementIteration = iteration;
+                    lastImprovementSeconds = stopwatch.Elapsed.TotalSeconds;
                 }
 
                 if (IsBetter(seedScore, currentScore))
@@ -145,6 +183,19 @@ namespace SeaNest.Nesting.Core.Nesting
 
             while (stopwatch.Elapsed < timeBudget)
             {
+                // Deterministic plateau exit: N consecutive iterations without
+                // a new best means the search has converged for this input;
+                // the remaining budget would be spent re-exploring known
+                // territory. Returns the same bestResult an exhausted budget
+                // would in the overwhelming majority of runs, and gives the
+                // wall-time back.
+                if (plateauExitIterations > 0 &&
+                    iteration - lastImprovementIteration >= plateauExitIterations)
+                {
+                    exitReason = $"plateau ({plateauExitIterations} stale iterations)";
+                    break;
+                }
+
                 iteration++;
 
                 double progress = Clamp01(stopwatch.Elapsed.TotalSeconds / timeBudget.TotalSeconds);
@@ -156,7 +207,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 var trialOrder = new List<int>(currentOrder);
                 MutateOrder(trialOrder, random, progress);
 
-                var trialResult = engine.PlaceAll(trialOrder);
+                var trialResult = TimedPlaceAll(trialOrder);
                 var trialScore = ScoreResult(trialResult);
 
                 bool betterThanCurrent = IsBetter(trialScore, currentScore);
@@ -175,6 +226,8 @@ namespace SeaNest.Nesting.Core.Nesting
                     bestOrder = trialOrder;
                     bestResult = trialResult;
                     bestScore = trialScore;
+                    lastImprovementIteration = iteration;
+                    lastImprovementSeconds = stopwatch.Elapsed.TotalSeconds;
 
                     // When a new best is found, continue from it. This makes the
                     // optimizer more aggressive for production nesting.
@@ -198,7 +251,7 @@ namespace SeaNest.Nesting.Core.Nesting
                 {
                     currentOrder = new List<int>(workingInitialOrder);
                     ApplyKickMutation(currentOrder, random);
-                    currentResult = engine.PlaceAll(currentOrder);
+                    currentResult = TimedPlaceAll(currentOrder);
                     currentScore = ScoreResult(currentResult);
 
                     if (IsBetter(currentScore, bestScore))
@@ -206,6 +259,8 @@ namespace SeaNest.Nesting.Core.Nesting
                         bestOrder = new List<int>(currentOrder);
                         bestResult = currentResult;
                         bestScore = currentScore;
+                        lastImprovementIteration = iteration;
+                        lastImprovementSeconds = stopwatch.Elapsed.TotalSeconds;
                     }
                 }
 
@@ -222,6 +277,14 @@ namespace SeaNest.Nesting.Core.Nesting
             progressCallback?.Invoke(
                 1.0,
                 FormatStatus("Annealing complete", iteration, bestScore, currentScore));
+
+            diagnostic?.Invoke(
+                $"SA: {iteration} iteration(s) in {stopwatch.Elapsed.TotalSeconds:F2}s " +
+                $"(budget {timeBudget.TotalSeconds:F0}s, exit: {exitReason}); " +
+                $"PlaceAll {placeAllCalls} call(s), {placeAllMs / 1000.0:F2}s " +
+                $"({(stopwatch.Elapsed.TotalMilliseconds > 0 ? placeAllMs * 100.0 / stopwatch.Elapsed.TotalMilliseconds : 0):F0}% of wall); " +
+                $"last improvement at iteration {lastImprovementIteration} " +
+                $"(t={lastImprovementSeconds:F2}s).");
 
             return bestResult;
         }

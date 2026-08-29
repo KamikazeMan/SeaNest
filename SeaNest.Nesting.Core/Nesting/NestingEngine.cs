@@ -87,6 +87,17 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         public TimeSpan? BeamRetryTimeBudget { get; set; }
 
+        /// <summary>
+        /// Iteration-based plateau exit for the simulated-annealing loop: stop
+        /// after this many consecutive iterations without a new best result.
+        /// The exhausted-budget behavior almost never improves past a long
+        /// plateau, and the exit point is iteration-based (not time-based) so
+        /// it stays deterministic for a given input and seed. 0 disables and
+        /// burns the full time budget (pre-optimization behavior).
+        /// Default 500 — generous enough that quality loss is negligible.
+        /// </summary>
+        public int SaPlateauExitIterations { get; set; } = 500;
+
         public NestResponse Nest(NestRequest request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
@@ -191,6 +202,12 @@ namespace SeaNest.Nesting.Core.Nesting
             // by DP simplification, so warm-start ordering is unaffected.
             var initialOrder = BuildLargestFirstOrder(nfpPolygons);
 
+            // Phase wall-time instrumentation: annealed runs chain up to five
+            // budget-bound or convergence-bound phases; this shows where the
+            // wall time actually goes.
+            var phaseSw = new Stopwatch();
+            double tAnneal = 0, tEvacuation = 0, tShelfPack = 0, tBeamRetry = 0, tCompaction = 0;
+
             if (useAnnealing)
             {
                 ProgressCallback?.Invoke(0.15, "Annealing...");
@@ -204,35 +221,50 @@ namespace SeaNest.Nesting.Core.Nesting
                 int seed = RandomSeed ?? 0;
                 DiagnosticCallback?.Invoke($"NFP_Annealed: SA random seed = {seed}");
 
+                phaseSw.Restart();
                 result = SimulatedAnnealing.Optimize(
                     engine,
                     initialOrder,
                     request.TimeBudget,
                     randomSeed: seed,
-                    progressCallback: saProgress);
+                    progressCallback: saProgress,
+                    diagnostic: DiagnosticCallback,
+                    plateauExitIterations: SaPlateauExitIterations);
+                phaseSw.Stop();
+                tAnneal = phaseSw.Elapsed.TotalSeconds;
             }
             else
             {
                 ProgressCallback?.Invoke(0.15, "Placing parts...");
+                phaseSw.Restart();
                 result = engine.PlaceAll(initialOrder);
+                phaseSw.Stop();
+                tAnneal = phaseSw.Elapsed.TotalSeconds;
                 ProgressCallback?.Invoke(0.95, "Finalizing...");
             }
 
             // Phase 23: last-sheet evacuation pass (NFP_Annealed only).
             if (useAnnealing && EvacuationTimeBudget.HasValue && result.SheetCount >= 2)
             {
+                phaseSw.Restart();
                 result = TryEvacuateLastSheet(
                     result, request, orientationsByPart, cache);
+                phaseSw.Stop();
+                tEvacuation = phaseSw.Elapsed.TotalSeconds;
             }
 
             // Phase 24b: single-sheet shelf-pack attempt (NFP_Annealed only).
             if (useAnnealing && ShelfPackTimeBudget.HasValue && result.SheetCount >= 2)
             {
+                phaseSw.Restart();
                 result = TrySingleSheetShelfPack(
                     result, request, nfpPolygons, orientationsByPart, cache);
+                phaseSw.Stop();
+                tShelfPack = phaseSw.Elapsed.TotalSeconds;
             }
 
             // Phase 27: single-sheet constrained beam retry (NFP_Annealed only).
+            phaseSw.Restart();
             if (useAnnealing && engine.BeamRetryTimeBudget.HasValue && result.SheetCount >= 2)
             {
                 double totalArea = 0;
@@ -341,9 +373,21 @@ namespace SeaNest.Nesting.Core.Nesting
             // command-level FinalVerifier runs on the compacted placements,
             // so the no-overlap guarantee is independently re-checked
             // downstream.
+            phaseSw.Stop();
+            tBeamRetry = phaseSw.Elapsed.TotalSeconds;
+
             ProgressCallback?.Invoke(0.97, "Compacting left+down...");
+            phaseSw.Restart();
             var compacted = Compactor.Compact(
                 result.Placements, request.Margin, request.Spacing, DiagnosticCallback);
+            phaseSw.Stop();
+            tCompaction = phaseSw.Elapsed.TotalSeconds;
+
+            DiagnosticCallback?.Invoke(
+                $"NFP phase times: anneal {tAnneal:F2}s, evacuation {tEvacuation:F2}s, " +
+                $"shelfpack {tShelfPack:F2}s, beamRetry {tBeamRetry:F2}s, " +
+                $"compaction {tCompaction:F2}s (total " +
+                $"{tAnneal + tEvacuation + tShelfPack + tBeamRetry + tCompaction:F2}s).");
 
             var placementsSorted = compacted
                 .OrderBy(p => p.OriginalIndex)

@@ -1577,6 +1577,8 @@ namespace SeaNest.Nesting.Core.Nesting
         {
             int count = 0;
 
+            SnapshotPlaced(sheet, out var cvpPolys, out var cvpBBoxes);
+
             foreach (var (orientation, feasible) in
                 EnumerateFeasibleRegions(partIndex, sheet))
             {
@@ -1587,19 +1589,9 @@ namespace SeaNest.Nesting.Core.Nesting
                     if (!IsSaneCandidate(cand.X, cand.Y))
                         continue;
 
-                    var candidatePoly = orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
-
-                    bool rejected = false;
-                    foreach (var placed in sheet.Placed)
-                    {
-                        var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
-                            placed.X, placed.Y);
-                        if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
-                        {
-                            rejected = true;
-                            break;
-                        }
-                    }
+                    Polygon candidatePoly = null;
+                    bool rejected = OverlapsPlacedSnapshot(
+                        orientation, cand.X, cand.Y, cvpPolys, cvpBBoxes, ref candidatePoly);
 
                     if (!rejected)
                     {
@@ -1620,19 +1612,9 @@ namespace SeaNest.Nesting.Core.Nesting
                         if (!IsSaneCandidate(pt.X, pt.Y))
                             continue;
 
-                        var candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
-
-                        bool rejected = false;
-                        foreach (var placed in sheet.Placed)
-                        {
-                            var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
-                                placed.X, placed.Y);
-                            if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
-                            {
-                                rejected = true;
-                                break;
-                            }
-                        }
+                        Polygon candidatePoly = null;
+                        bool rejected = OverlapsPlacedSnapshot(
+                            orientation, pt.X, pt.Y, cvpPolys, cvpBBoxes, ref candidatePoly);
 
                         if (!rejected)
                         {
@@ -1688,6 +1670,8 @@ namespace SeaNest.Nesting.Core.Nesting
             boundaryValidCount = 0;
             interiorValidCount = 0;
 
+            SnapshotPlaced(sheet, out var topkPolys, out var topkBBoxes);
+
             foreach (var orientation in orientations)
             {
                 var ifp = InnerFitPolygon.Compute(
@@ -1713,22 +1697,13 @@ namespace SeaNest.Nesting.Core.Nesting
                     if (!IsSaneCandidate(cand.X, cand.Y))
                         continue;
 
-                    var candidatePoly = orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
-
-                    bool rejected = false;
-                    foreach (var placed in sheet.Placed)
-                    {
-                        var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
-                            placed.X, placed.Y);
-                        if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
-                        {
-                            rejected = true;
-                            break;
-                        }
-                    }
-
-                    if (rejected)
+                    Polygon candidatePoly = null;
+                    if (OverlapsPlacedSnapshot(
+                            orientation, cand.X, cand.Y, topkPolys, topkBBoxes, ref candidatePoly))
                         continue;
+
+                    if (candidatePoly == null)
+                        candidatePoly = orientation.CanonicalPolygon.Translate(cand.X, cand.Y);
 
                     boundaryValidCount++;
                     var score = ScorePlacementCandidate(candidatePoly, sheet);
@@ -1757,22 +1732,13 @@ namespace SeaNest.Nesting.Core.Nesting
                         if (!IsSaneCandidate(pt.X, pt.Y))
                             continue;
 
-                        var candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
-
-                        bool rejected = false;
-                        foreach (var placed in sheet.Placed)
-                        {
-                            var priorPoly = placed.Orientation.CanonicalPolygon.Translate(
-                                placed.X, placed.Y);
-                            if (OverlapChecker.Overlaps(candidatePoly, priorPoly, OverlapTolerance))
-                            {
-                                rejected = true;
-                                break;
-                            }
-                        }
-
-                        if (rejected)
+                        Polygon candidatePoly = null;
+                        if (OverlapsPlacedSnapshot(
+                                orientation, pt.X, pt.Y, topkPolys, topkBBoxes, ref candidatePoly))
                             continue;
+
+                        if (candidatePoly == null)
+                            candidatePoly = orientation.CanonicalPolygon.Translate(pt.X, pt.Y);
 
                         interiorValidCount++;
                         var score = ScorePlacementCandidate(candidatePoly, sheet);
@@ -2178,6 +2144,47 @@ namespace SeaNest.Nesting.Core.Nesting
         // ------------------------------------------------------------------
         // Smart candidate scoring
         // ------------------------------------------------------------------
+
+        // Beam-path speedup (same pattern as TryPlaceOnSheet's edf8b01 fix):
+        // translate every placed polygon ONCE per method call instead of per
+        // candidate x placed pair, and front the Clipper narrow phase with an
+        // arithmetic AABB test so bbox-disjoint pairs never allocate or clip.
+        private static void SnapshotPlaced(
+            SheetState sheet, out Polygon[] polys, out BoundingBox2D[] bboxes)
+        {
+            int n = sheet.Placed.Count;
+            polys = new Polygon[n];
+            bboxes = new BoundingBox2D[n];
+            for (int i = 0; i < n; i++)
+            {
+                var pl = sheet.Placed[i];
+                var poly = pl.Orientation.CanonicalPolygon.Translate(pl.X, pl.Y);
+                polys[i] = poly;
+                bboxes[i] = poly.BoundingBox;
+            }
+        }
+
+        // Returns true if the candidate at (x, y) overlaps any snapshotted
+        // placed polygon. candidatePoly is translated lazily on the first
+        // bbox hit and handed back so the caller can reuse it for scoring
+        // without re-translating.
+        private static bool OverlapsPlacedSnapshot(
+            OrientedPart orientation, double x, double y,
+            Polygon[] placedPolys, BoundingBox2D[] placedBBoxes,
+            ref Polygon candidatePoly)
+        {
+            var obb = orientation.BBox;
+            var candBBox = new BoundingBox2D(x, y, x + obb.MaxX, y + obb.MaxY);
+            for (int i = 0; i < placedPolys.Length; i++)
+            {
+                if (!candBBox.Intersects(placedBBoxes[i])) continue;
+                if (candidatePoly == null)
+                    candidatePoly = orientation.CanonicalPolygon.Translate(x, y);
+                if (OverlapChecker.Overlaps(candidatePoly, placedPolys[i], OverlapTolerance))
+                    return true;
+            }
+            return false;
+        }
 
         private PlacementScore ScorePlacementCandidate(
             Polygon candidatePoly,
