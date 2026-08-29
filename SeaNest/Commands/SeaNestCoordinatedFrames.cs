@@ -189,7 +189,10 @@ namespace SeaNest.Commands
                 // PolygonToCurve.ToCurveFromOriginal.
                 var polygons = new List<Polygon>();
                 var holeCurvesPerPart = new List<List<Curve>>();
-                var partSourceCurveIdx = new List<int>(); // diagnostic only
+                var partSourceCurveIdx = new List<int>();
+                var partPlane = new List<Plane>(); // conversion plane per part —
+                                                   // needed to remap curves that
+                                                   // the overlap pass re-attaches
                 foreach (int outerIdx in outers)
                 {
                     var outerCurve = closedCurves[outerIdx];
@@ -208,6 +211,7 @@ namespace SeaNest.Commands
 
                     polygons.Add(converted.Value.polygon);
                     partSourceCurveIdx.Add(outerIdx);
+                    partPlane.Add(op);
 
                     // Map every attached hole into the outer's plane frame so
                     // it shares WorldXY with the polygon and lines up under
@@ -226,6 +230,147 @@ namespace SeaNest.Commands
                     Flush(diag);
                     return Result.Failure;
                 }
+                // ----------------------------------------------------------------
+                // Overlap re-association pass (best-enclosing-parent).
+                //
+                // Strict containment (topology partition above) cannot attach a
+                // hole that STRADDLES its frame's outer boundary — pipe holes /
+                // cutouts crossing the edge fail bbox-inside and read as
+                // MutualIntersection from PCR legitimately. Catamaran symptom:
+                // the 7th (largest) frame's straddling holes nested as loose
+                // standalone parts.
+                //
+                // Rule (documented per spec): every non-frame part is tested
+                // against every FRAME part by Clipper intersection area in
+                // WORLD-XY space (the input layout is flat; the plane-relative
+                // polygons used for nesting are NOT in a shared frame, so the
+                // overlap runs on world-XY discretizations of the original
+                // curves). The part attaches as a HOLE to the frame with the
+                // LARGEST overlap iff that overlap exceeds 50% of the part's
+                // own area — "the frame it mostly sits in". Ties (equal
+                // overlap) break to the lower frame part index for
+                // determinism. A part that clears 50% for no frame stays a
+                // genuine standalone part. Frames are never absorbed into
+                // other frames.
+                //
+                // Frame rule matches the placement stage exactly: Irregular
+                // classification AND bbox area >= 5% of sheet area.
+                // ----------------------------------------------------------------
+                {
+                    double reassocSheetArea = sheetW * sheetH;
+                    double reassocThreshold = reassocSheetArea * 0.05;
+                    var frameParts = new List<int>();
+                    for (int k = 0; k < polygons.Count; k++)
+                    {
+                        if (PartClassifier.Classify(polygons[k]) == PartClass.Irregular)
+                        {
+                            var bb = polygons[k].BoundingBox;
+                            if (bb.Width * bb.Height >= reassocThreshold)
+                                frameParts.Add(k);
+                        }
+                    }
+
+                    // World-XY polygons for overlap testing, from the ORIGINAL
+                    // curves (shared coordinate space).
+                    var worldXY = new Polygon[polygons.Count];
+                    for (int k = 0; k < polygons.Count; k++)
+                        worldXY[k] = CurveToWorldXYPolygon(
+                            closedCurves[partSourceCurveIdx[k]], discretizeTol, angleTolRad);
+
+                    var absorbedParts = new List<int>();          // part indices to remove
+                    var absorbedSourceCurves = new HashSet<int>(); // for near-miss dedupe
+                    var standaloneNoOverlap = new List<int>();
+
+                    for (int k = 0; k < polygons.Count; k++)
+                    {
+                        if (frameParts.Contains(k)) continue;      // frames never absorbed
+                        if (worldXY[k] == null) continue;
+
+                        double candArea = worldXY[k].AbsoluteArea;
+                        if (candArea <= 1e-12) continue;
+
+                        int bestFramePart = -1;
+                        double bestOverlap = 0.0;
+                        foreach (int fp in frameParts)
+                        {
+                            if (worldXY[fp] == null) continue;
+                            double ov = OverlapChecker.IntersectionArea(worldXY[k], worldXY[fp]);
+                            if (ov > bestOverlap + 1e-12)
+                            {
+                                bestOverlap = ov;
+                                bestFramePart = fp;
+                            }
+                            // Equal overlap keeps the earlier (lower-index) frame.
+                        }
+
+                        double fraction = bestOverlap / candArea;
+                        if (bestFramePart >= 0 && fraction > 0.5)
+                        {
+                            // Attach part k (and any holes it already owned) to
+                            // the best-overlap frame, remapped into the frame's
+                            // conversion plane so they transform with it.
+                            var framePlaneK = partPlane[bestFramePart];
+                            var asHole = MapCurveToLocalFrame(
+                                closedCurves[partSourceCurveIdx[k]], framePlaneK);
+                            if (asHole != null)
+                                holeCurvesPerPart[bestFramePart].Add(asHole);
+                            foreach (int childHoleIdx in holesByOuter[partSourceCurveIdx[k]])
+                            {
+                                var childMapped = MapCurveToLocalFrame(
+                                    closedCurves[childHoleIdx], framePlaneK);
+                                if (childMapped != null)
+                                    holeCurvesPerPart[bestFramePart].Add(childMapped);
+                            }
+
+                            absorbedParts.Add(k);
+                            absorbedSourceCurves.Add(partSourceCurveIdx[k]);
+                            diag.Add($"  curve #{partSourceCurveIdx[k]} attached by OVERLAP " +
+                                     $"(not strict containment) to frame part {bestFramePart} " +
+                                     $"(curve #{partSourceCurveIdx[bestFramePart]}): " +
+                                     $"{fraction:P0} of its area overlaps.");
+                        }
+                        else if (bestOverlap > 1e-12)
+                        {
+                            // Overlaps a frame but under threshold — surfaced so
+                            // a mis-threshold is visible, kept standalone.
+                            diag.Add($"  curve #{partSourceCurveIdx[k]} overlaps frame part " +
+                                     $"{bestFramePart} by only {fraction:P0} of its area " +
+                                     "(<= 50% threshold) — kept as standalone part.");
+                        }
+                        else
+                        {
+                            standaloneNoOverlap.Add(partSourceCurveIdx[k]);
+                        }
+                    }
+
+                    // Rebuild the part lists without the absorbed parts
+                    // (descending removal keeps indices valid).
+                    absorbedParts.Sort();
+                    for (int r = absorbedParts.Count - 1; r >= 0; r--)
+                    {
+                        int k = absorbedParts[r];
+                        polygons.RemoveAt(k);
+                        holeCurvesPerPart.RemoveAt(k);
+                        partSourceCurveIdx.RemoveAt(k);
+                        partPlane.RemoveAt(k);
+                    }
+
+                    if (standaloneNoOverlap.Count > 0)
+                        diag.Add($"  {standaloneNoOverlap.Count} part(s) overlap no frame — genuine " +
+                                 $"standalone: curves #{string.Join(",#", standaloneNoOverlap)}");
+
+                    // Explicit orphan report from the strict pass: only curves
+                    // that the overlap pass did NOT absorb remain candidates
+                    // for the phantom-standalone warning.
+                    foreach (var nm in nearMisses)
+                    {
+                        if (parent[nm.Inner] == -1 && !absorbedSourceCurves.Contains(nm.Inner))
+                            diag.Add($"  WARNING: curve #{nm.Inner} looks interior to curve #{nm.Outer} " +
+                                     $"but could not be attached ({nm.Reason}) — " +
+                                     "it will nest as a STANDALONE part.");
+                    }
+                }
+
                 int totalHolesAttached = holeCurvesPerPart.Sum(l => l.Count);
                 diag.Add($"Read {polygons.Count} outer part(s) from the nested layout " +
                          $"({nC} closed curve(s); {totalHolesAttached} hole(s) attached to parents).");
@@ -237,20 +382,6 @@ namespace SeaNest.Commands
                 {
                     diag.Add($"  part {k} (curve #{partSourceCurveIdx[k]}): " +
                              $"{holeCurvesPerPart[k].Count} hole(s) attached");
-                }
-
-                // Explicit orphan report: any near-miss pair whose inner curve
-                // ended up as an OUTER part is an interior curve we failed to
-                // attach — exactly the phantom-standalone-part bug. Should be
-                // empty after the containment fix; if it fires, the reason
-                // string says which test failed so the geometry can be
-                // inspected directly.
-                foreach (var nm in nearMisses)
-                {
-                    if (parent[nm.Inner] == -1)
-                        diag.Add($"  WARNING: curve #{nm.Inner} looks interior to curve #{nm.Outer} " +
-                                 $"but could not be attached ({nm.Reason}) — " +
-                                 "it will nest as a STANDALONE part.");
                 }
 
                 var request = new NestRequest(
@@ -590,6 +721,49 @@ namespace SeaNest.Commands
                 probePlane = fallbackPlane;
             var cont = outer.Contains(probe, probePlane, tol);
             return cont == PointContainment.Inside || cont == PointContainment.Coincident;
+        }
+
+        // World-XY discretization of a closed curve, for the overlap
+        // re-association pass. The nesting polygons are converted through each
+        // curve's OWN tangent plane (plane-relative u,v coordinates) and are
+        // therefore NOT in a shared coordinate space; overlap between two
+        // different parts must be computed in world space. The input layout is
+        // flat, so dropping Z gives the true footprint. No vertex-cap
+        // simplification: this polygon is used for area math only (a dozen
+        // curves at read time), never for NFP.
+        private static Polygon CurveToWorldXYPolygon(
+            Curve curve, double discretizeTol, double angleTolRad)
+        {
+            if (curve == null || !curve.IsClosed) return null;
+
+            Polyline polyline;
+            if (!curve.TryGetPolyline(out polyline))
+            {
+                var polylineCurve = curve.ToPolyline(
+                    mainSegmentCount: 0,
+                    subSegmentCount: 0,
+                    maxAngleRadians: angleTolRad,
+                    maxChordLengthRatio: 0,
+                    maxAspectRatio: 0,
+                    tolerance: discretizeTol,
+                    minEdgeLength: 0,
+                    maxEdgeLength: 0,
+                    keepStartPoint: true);
+                if (polylineCurve == null || !polylineCurve.TryGetPolyline(out polyline))
+                    return null;
+            }
+
+            if (polyline == null || polyline.Count < 3) return null;
+
+            var points = new List<Point2D>(polyline.Count);
+            int count = polyline.Count;
+            if (polyline.IsClosed && count > 3) count--;
+            for (int i = 0; i < count; i++)
+                points.Add(new Point2D(polyline[i].X, polyline[i].Y));
+            if (points.Count < 3) return null;
+
+            try { return new Polygon(points); }
+            catch (ArgumentException) { return null; }
         }
 
         private static Curve MapCurveToLocalFrame(Curve curve, Plane plane)
