@@ -98,6 +98,18 @@ namespace SeaNest.Nesting.Core.Nesting
         /// </summary>
         public int SaPlateauExitIterations { get; set; } = 500;
 
+        /// <summary>
+        /// Wall-clock no-improvement exit for the SA loop: stop once this
+        /// many seconds pass without a new best result. Complements
+        /// <see cref="SaPlateauExitIterations"/> for jobs whose slow
+        /// iterations never reach the iteration threshold within the budget
+        /// (the measured case: last improvement at t=4.55s of a 30s budget,
+        /// 25s wasted). Time-based, so the exact exit point varies with
+        /// machine speed — same caveat the overall time budget always had.
+        /// 0 disables. Default 8s.
+        /// </summary>
+        public double SaNoImprovementExitSeconds { get; set; } = 8.0;
+
         public NestResponse Nest(NestRequest request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
@@ -229,7 +241,8 @@ namespace SeaNest.Nesting.Core.Nesting
                     randomSeed: seed,
                     progressCallback: saProgress,
                     diagnostic: DiagnosticCallback,
-                    plateauExitIterations: SaPlateauExitIterations);
+                    plateauExitIterations: SaPlateauExitIterations,
+                    plateauExitSeconds: SaNoImprovementExitSeconds);
                 phaseSw.Stop();
                 tAnneal = phaseSw.Elapsed.TotalSeconds;
             }

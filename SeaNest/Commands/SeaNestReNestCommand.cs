@@ -38,10 +38,15 @@ namespace SeaNest.Commands
         // doesn't carry that constraint.
         private const NestingAlgorithm DefaultAlgorithm = NestingAlgorithm.NFP_Annealed;
         private const bool DefaultAllowMirror = true;
-        private const double DefaultTimeBudgetSeconds = 30.0;
+        // Phase-timing data (mixed-thickness catamaran job): anneal found its
+        // last improvement at t=4.55s of a 30s budget; shelfpack and beam
+        // retry maxed 60s/120s budgets without improving the result. Defaults
+        // cut to match measured convergence — the prompts still accept any
+        // value (0 disables the optional phases).
+        private const double DefaultTimeBudgetSeconds = 8.0;
         private const double DefaultEvacuationBudgetSeconds = 60.0;
-        private const double DefaultShelfPackBudgetSeconds = 60.0;
-        private const double DefaultBeamRetryBudgetSeconds = 120.0;
+        private const double DefaultShelfPackBudgetSeconds = 20.0;
+        private const double DefaultBeamRetryBudgetSeconds = 30.0;
 
         // Phase 18 — match BrepFlattener's vertex cap so the engine never sees
         // a curve's raw chord-tessellation. Original Rhino Curve is preserved

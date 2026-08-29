@@ -54,6 +54,16 @@ namespace SeaNest.Nesting.Core.Nesting
         /// Iteration-based rather than time-based so the exit point is
         /// deterministic for a given input and seed.
         /// </param>
+        /// <param name="plateauExitSeconds">
+        /// Wall-clock no-improvement exit: when > 0, the annealing loop stops
+        /// once this many seconds pass without a new best result. 0 disables.
+        /// Field data motivating it: a 30s-budget run whose last improvement
+        /// landed at t=4.55s spent the remaining 25s finding nothing. NOTE:
+        /// unlike plateauExitIterations this is time-based, so the exact exit
+        /// point varies with machine speed (the pre-existing overall time
+        /// budget already had that property); the returned result is always
+        /// the best found so far.
+        /// </param>
         public static NfpPlacementEngine.NestResult Optimize(
             NfpPlacementEngine engine,
             IReadOnlyList<int> initialOrder,
@@ -61,7 +71,8 @@ namespace SeaNest.Nesting.Core.Nesting
             int randomSeed,
             Action<double, string> progressCallback,
             Action<string> diagnostic = null,
-            int plateauExitIterations = 0)
+            int plateauExitIterations = 0,
+            double plateauExitSeconds = 0.0)
         {
             if (engine == null) throw new ArgumentNullException(nameof(engine));
             if (initialOrder == null) throw new ArgumentNullException(nameof(initialOrder));
@@ -193,6 +204,16 @@ namespace SeaNest.Nesting.Core.Nesting
                     iteration - lastImprovementIteration >= plateauExitIterations)
                 {
                     exitReason = $"plateau ({plateauExitIterations} stale iterations)";
+                    break;
+                }
+
+                // Wall-clock no-improvement window. Complements the iteration
+                // plateau for slow-iteration jobs where few iterations fit the
+                // budget and the iteration threshold never trips.
+                if (plateauExitSeconds > 0.0 &&
+                    stopwatch.Elapsed.TotalSeconds - lastImprovementSeconds >= plateauExitSeconds)
+                {
+                    exitReason = $"no improvement for {plateauExitSeconds:F0}s";
                     break;
                 }
 
